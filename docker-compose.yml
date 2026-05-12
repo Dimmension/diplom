@@ -1,0 +1,120 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+    container_name: render_frontend
+    environment:
+      VITE_API_BASE: /v1
+      VITE_API_PROXY_TARGET: http://api:8000
+      TZ: Europe/Moscow
+    ports:
+      - '5173:5173'
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    logging: *default-logging
+    depends_on: 
+      - api
+
+  api:
+    build:
+      context: ./backend
+    container_name: render_api
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/renderdb
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: render-assets
+      RENDER_TIMEOUT_SECONDS: 60
+      RENDER_WIDTH: 1920
+      RENDER_HEIGHT: 1080
+      RENDER_REQUIRE_GPU: "false"
+      TZ: Europe/Moscow
+    ports:
+      - '8000:8000'
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend/app:/app/app
+    logging: *default-logging
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  worker:
+    build:
+      context: ./backend
+    container_name: render_worker
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/renderdb
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: render-assets
+      RENDER_TIMEOUT_SECONDS: 60
+      RENDER_WIDTH: 1920
+      RENDER_HEIGHT: 1080
+      RENDER_REQUIRE_GPU: "false"
+      TZ: Europe/Moscow
+    volumes:
+      - ./backend/app:/app/app
+    logging: *default-logging
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  redis:
+    image: redis:7-alpine
+    container_name: render_redis
+    environment:
+      TZ: Europe/Moscow
+    ports:
+      - '6379:6379'
+    logging: *default-logging
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: render_postgres
+    environment:
+      POSTGRES_DB: renderdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      TZ: Europe/Moscow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+    logging: *default-logging
+
+  minio:
+    image: minio/minio:latest
+    container_name: render_minio
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      TZ: Europe/Moscow
+    volumes:
+      - minio_data:/data
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    logging: *default-logging
+
+volumes:
+  pgdata:
+  minio_data:
+  frontend_node_modules:
