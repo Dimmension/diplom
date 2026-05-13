@@ -11,14 +11,27 @@ from app.schemas import (
     AssetUploadResponse,
     CreateRenderRequest,
     CreateRenderResponse,
+    CreateYoloDatasetRequest,
+    CreateYoloDatasetResponse,
     CreateSceneRequest,
     RenderResultResponse,
     RenderStatusResponse,
     SceneResponse,
     UpdateSceneConfigRequest,
+    YoloDatasetResultResponse,
+    YoloDatasetResultSummary,
+    YoloDatasetStatusResponse,
 )
 from app.services.assets import list_assets, upload_asset
-from app.services.renders import create_render_job, get_render_job, get_render_result
+from app.services.renders import (
+    create_render_job,
+    create_yolo_dataset_job,
+    get_additional_render_urls,
+    get_render_job,
+    get_render_result,
+    get_yolo_dataset_job,
+    get_yolo_dataset_result,
+)
 from app.services.scenes import create_scene, update_scene_config
 from app.storage import storage
 
@@ -144,8 +157,40 @@ def get_render_status_endpoint(render_job_id: int, db: Session = Depends(get_db)
 @app.get(f'{settings.api_prefix}/renders/{{render_job_id}}/result', response_model=RenderResultResponse)
 def get_render_result_endpoint(render_job_id: int, db: Session = Depends(get_db)) -> RenderResultResponse:
     render_job, png_url = get_render_result(db, render_job_id)
+    mask_url, bbox_url = get_additional_render_urls(render_job_id)
     return RenderResultResponse(
         png_url=png_url,
+        mask_url=mask_url,
+        bbox_url=bbox_url,
         scene_config_used=render_job.scene_config_used,
         scene_config_suggested=render_job.scene_config_suggested,
+    )
+
+
+@app.post(f'{settings.api_prefix}/datasets/yolo', response_model=CreateYoloDatasetResponse)
+def create_yolo_dataset_endpoint(payload: CreateYoloDatasetRequest, db: Session = Depends(get_db)) -> CreateYoloDatasetResponse:
+    job = create_yolo_dataset_job(db, payload)
+    return CreateYoloDatasetResponse(dataset_job_id=job.id, status=job.status)
+
+
+@app.get(f'{settings.api_prefix}/datasets/yolo/{{dataset_job_id}}', response_model=YoloDatasetStatusResponse)
+def get_yolo_dataset_status_endpoint(dataset_job_id: int, db: Session = Depends(get_db)) -> YoloDatasetStatusResponse:
+    job = get_yolo_dataset_job(db, dataset_job_id)
+    return YoloDatasetStatusResponse(
+        dataset_job_id=job.id,
+        status=job.status,
+        progress=job.progress,
+        started_at=job.started_at,
+        updated_at=job.updated_at,
+        error_code=job.error_code,
+        error_message=job.error_message,
+    )
+
+
+@app.get(f'{settings.api_prefix}/datasets/yolo/{{dataset_job_id}}/result', response_model=YoloDatasetResultResponse)
+def get_yolo_dataset_result_endpoint(dataset_job_id: int, db: Session = Depends(get_db)) -> YoloDatasetResultResponse:
+    zip_url, summary = get_yolo_dataset_result(db, dataset_job_id)
+    return YoloDatasetResultResponse(
+        zip_url=zip_url,
+        summary=YoloDatasetResultSummary(**summary),
     )

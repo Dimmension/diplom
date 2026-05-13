@@ -18,6 +18,13 @@ class RenderStatusSchema(str, Enum):
     failed = 'failed'
 
 
+class DatasetStatusSchema(str, Enum):
+    queued = 'queued'
+    running = 'running'
+    succeeded = 'succeeded'
+    failed = 'failed'
+
+
 class Vec3(BaseModel):
     x: float = 0.0
     y: float = 0.0
@@ -95,5 +102,47 @@ class RenderStatusResponse(BaseModel):
 
 class RenderResultResponse(BaseModel):
     png_url: str
+    mask_url: str
+    bbox_url: str
     scene_config_used: SceneConfig
     scene_config_suggested: SceneConfig
+
+
+class CreateYoloDatasetRequest(BaseModel):
+    scene_id: int
+    scene_config_snapshot: SceneConfig
+    count: int = Field(default=10, ge=1, le=5000)
+    width: int = Field(default=640, ge=64, le=4096)
+    height: int = Field(default=640, ge=64, le=4096)
+    split_train_count: int = Field(default=8, ge=1)
+    split_val_count: int = Field(default=2, ge=1)
+    randomization_preset: str = 'medium'
+    include_debug: bool = True
+
+
+class CreateYoloDatasetResponse(BaseModel):
+    dataset_job_id: int
+    status: DatasetStatusSchema
+
+
+class YoloDatasetStatusResponse(BaseModel):
+    dataset_job_id: int
+    status: DatasetStatusSchema
+    progress: int
+    started_at: datetime | None
+    updated_at: datetime
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+class YoloDatasetResultSummary(BaseModel):
+    images_total: int
+    train_count: int
+    val_count: int
+    empty_labels_count: int
+    class_names: list[str]
+
+
+class YoloDatasetResultResponse(BaseModel):
+    zip_url: str
+    summary: YoloDatasetResultSummary

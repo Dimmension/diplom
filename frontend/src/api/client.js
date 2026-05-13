@@ -44,3 +44,18 @@ export async function getRenderResult(renderJobId) {
   const { data } = await api.get(`/renders/${renderJobId}/result`)
   return data
 }
+
+export async function createYoloDataset(payload) {
+  const { data } = await api.post('/datasets/yolo', payload)
+  return data
+}
+
+export async function getYoloDatasetStatus(datasetJobId) {
+  const { data } = await api.get(`/datasets/yolo/${datasetJobId}`)
+  return data
+}
+
+export async function getYoloDatasetResult(datasetJobId) {
+  const { data } = await api.get(`/datasets/yolo/${datasetJobId}/result`)
+  return data
+}

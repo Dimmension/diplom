@@ -5,9 +5,14 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+ARG BLENDER_VERSION=4.3.2
+ARG BLENDER_SERIES=4.3
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    blender \
     git \
+    wget \
+    xz-utils \
+    ca-certificates \
     python3-numpy \
     libsm6 \
     libice6 \
@@ -26,6 +31,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libegl1 \
     libglu1-mesa \
     && rm -rf /var/lib/apt/lists/*
+
+RUN wget -O /tmp/blender.tar.xz \
+    https://download.blender.org/release/Blender${BLENDER_SERIES}/blender-${BLENDER_VERSION}-linux-x64.tar.xz \
+    && mkdir -p /opt/blender \
+    && tar -xf /tmp/blender.tar.xz -C /opt/blender --strip-components=1 \
+    && ln -sf /opt/blender/blender /usr/local/bin/blender \
+    && rm /tmp/blender.tar.xz
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

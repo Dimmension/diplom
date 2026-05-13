@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  createYoloDataset,
   createRender,
   createScene,
+  getYoloDatasetResult,
+  getYoloDatasetStatus,
   getRenderResult,
   getRenderStatus,
   listAssets,
@@ -29,6 +32,13 @@ const defaultConfig = {
   skybox_asset_id: null,
 }
 
+function toRenderErrorMessage(errorCode, fallbackMessage) {
+  if (errorCode === 'GPU_UNAVAILABLE') {
+    return 'GPU недоступен: рендер остановлен. Проверьте доступность GPU на сервере.'
+  }
+  return fallbackMessage || 'Ошибка рендера'
+}
+
 function nearlyEqual(a, b, eps = 0.0001) {
   return Math.abs(a - b) <= eps
 }
@@ -48,6 +58,32 @@ function AxisInput({ label, value, onChange, step = 0.1 }) {
 
 function BusyDot() {
   return <span className="busy-dot" aria-hidden="true" />
+}
+
+function GenerationProgress({ value, label }) {
+  const safeValue = Math.max(0, Math.min(100, Number(value) || 0))
+  return (
+    <div className="generation-progress">
+      <div className="generation-progress-head">
+        <span>{label}</span>
+        <strong>{safeValue}%</strong>
+      </div>
+      <div className="generation-progress-track" role="progressbar" aria-valuenow={safeValue} aria-valuemin={0} aria-valuemax={100}>
+        <div className="generation-progress-fill" style={{ width: `${safeValue}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function RenderResultCard({ title, url, alt }) {
+  if (!url) return null
+  return (
+    <article className="result-card">
+      <p>{title}</p>
+      <img src={url} alt={alt} />
+      <a href={url} target="_blank" rel="noreferrer">Открыть</a>
+    </article>
+  )
 }
 
 function StatusCircle({ state }) {
@@ -114,6 +150,13 @@ export default function App() {
   const [renderJobId, setRenderJobId] = useState(null)
   const [renderStatus, setRenderStatus] = useState(null)
   const [result, setResult] = useState(null)
+  const [datasetJobId, setDatasetJobId] = useState(null)
+  const [datasetStatus, setDatasetStatus] = useState(null)
+  const [datasetProgress, setDatasetProgress] = useState(0)
+  const [datasetResult, setDatasetResult] = useState(null)
+  const [datasetCount, setDatasetCount] = useState(10)
+  const [datasetWidth, setDatasetWidth] = useState(640)
+  const [datasetHeight, setDatasetHeight] = useState(640)
   const [activeTask, setActiveTask] = useState(null)
   const [sidebarHeight, setSidebarHeight] = useState(null)
   const [showParameters, setShowParameters] = useState(true)
@@ -130,6 +173,11 @@ export default function App() {
 
   const busy = activeTask !== null
   const canRender = objectAsset && environmentAsset && !busy
+  const datasetCountValid = Number.isFinite(datasetCount) && datasetCount >= 2 && datasetCount <= 5000
+  const datasetWidthValid = Number.isFinite(datasetWidth) && datasetWidth >= 64 && datasetWidth <= 4096
+  const datasetHeightValid = Number.isFinite(datasetHeight) && datasetHeight >= 64 && datasetHeight <= 4096
+  const datasetConfigValid = datasetCountValid && datasetWidthValid && datasetHeightValid
+  const canBuildDataset = objectAsset && environmentAsset && !busy && datasetConfigValid
 
   async function reloadAssetKind(kind) {
     const items = await listAssets(kind, 50)
@@ -254,6 +302,69 @@ export default function App() {
       setRenderJobId(data.render_job_id)
       setRenderStatus(data.status)
     } catch (err) {
+      const statusCode = err.response?.status
+      const detail = err.response?.data?.detail || err.message
+      if (statusCode === 503) {
+        setError(toRenderErrorMessage('GPU_UNAVAILABLE', detail))
+      } else {
+        setError(detail)
+      }
+      setActiveTask(null)
+    }
+  }
+
+  async function startYoloDataset() {
+    if (!objectAsset || !environmentAsset) return
+    if (!datasetConfigValid) {
+      setError('Проверьте параметры датасета: count 2-5000, width/height 64-4096.')
+      return
+    }
+    setActiveTask('dataset')
+    setError('')
+    setDatasetProgress(0)
+    setDatasetResult(null)
+    try {
+      let targetSceneId = sceneId
+      if (!targetSceneId) {
+        const sceneData = await createScene({
+          object_asset_id: objectAsset.asset_id,
+          environment_asset_id: environmentAsset.asset_id,
+          skybox_asset_id: skyboxAsset?.asset_id ?? null,
+        })
+        targetSceneId = sceneData.scene_id
+        setSceneId(targetSceneId)
+      }
+
+      const cameraFromViewport = sceneViewportRef.current?.getCameraTransform?.()
+      const configSnapshot = cameraFromViewport
+        ? { ...sceneConfigRef.current, camera: cameraFromViewport }
+        : sceneConfigRef.current
+
+      sceneConfigRef.current = configSnapshot
+      setSceneConfig(configSnapshot)
+      await updateSceneConfig(targetSceneId, configSnapshot)
+
+      const count = Math.max(2, Math.min(5000, Math.trunc(datasetCount)))
+      const width = Math.max(64, Math.min(4096, Math.trunc(datasetWidth)))
+      const height = Math.max(64, Math.min(4096, Math.trunc(datasetHeight)))
+      const splitTrain = Math.max(1, Math.floor(count * 0.8))
+      const splitVal = Math.max(1, count - splitTrain)
+      const normalizedTrain = count - splitVal
+
+      const data = await createYoloDataset({
+        scene_id: targetSceneId,
+        scene_config_snapshot: configSnapshot,
+        count,
+        width,
+        height,
+        split_train_count: normalizedTrain,
+        split_val_count: splitVal,
+        randomization_preset: 'medium',
+        include_debug: true,
+      })
+      setDatasetJobId(data.dataset_job_id)
+      setDatasetStatus(data.status)
+    } catch (err) {
       setError(err.response?.data?.detail || err.message)
       setActiveTask(null)
     }
@@ -275,7 +386,7 @@ export default function App() {
         }
 
         if (statusPayload.status === 'failed') {
-          setError(statusPayload.error_message || 'Ошибка рендера')
+          setError(toRenderErrorMessage(statusPayload.error_code, statusPayload.error_message))
           setActiveTask(null)
           clearInterval(timer)
         }
@@ -288,6 +399,38 @@ export default function App() {
 
     return () => clearInterval(timer)
   }, [renderJobId])
+
+  useEffect(() => {
+    if (!datasetJobId) return undefined
+
+    const timer = setInterval(async () => {
+      try {
+        const statusPayload = await getYoloDatasetStatus(datasetJobId)
+        setDatasetStatus(statusPayload.status)
+        setDatasetProgress(statusPayload.progress ?? 0)
+
+        if (statusPayload.status === 'succeeded') {
+          const res = await getYoloDatasetResult(datasetJobId)
+          setDatasetResult(res)
+          setDatasetProgress(100)
+          setActiveTask(null)
+          clearInterval(timer)
+        }
+
+        if (statusPayload.status === 'failed') {
+          setError(statusPayload.error_message || 'Ошибка генерации датасета')
+          setActiveTask(null)
+          clearInterval(timer)
+        }
+      } catch (err) {
+        setError(err.response?.data?.detail || err.message)
+        setActiveTask(null)
+        clearInterval(timer)
+      }
+    }, 2000)
+
+    return () => clearInterval(timer)
+  }, [datasetJobId])
 
   useEffect(() => {
     const sidebarNode = sidebarRef.current
@@ -324,6 +467,17 @@ export default function App() {
 
     return renderStatus
   }, [renderStatus])
+
+  const datasetStatusLabel = useMemo(() => {
+    if (!datasetStatus) return 'Ожидание'
+    if (datasetStatus === 'queued') return 'В очереди'
+    if (datasetStatus === 'running') return 'Генерация'
+    if (datasetStatus === 'succeeded') return 'Готово'
+    if (datasetStatus === 'failed') return 'Ошибка'
+    return datasetStatus
+  }, [datasetStatus])
+
+  const datasetResolutionLabel = `${datasetWidth}x${datasetHeight}`
 
   const workflowRows = useMemo(() => {
     const renderState = renderStatus === 'failed'
@@ -506,10 +660,11 @@ export default function App() {
           {activeTask === 'render' || renderJobId || result ? (
             <div className="result-wrap">
               {result ? (
-                <>
-                  <img src={result.png_url} alt="Результат рендера" />
-                  <a href={result.png_url} target="_blank" rel="noreferrer">Открыть PNG</a>
-                </>
+                <div className="result-grid">
+                  <RenderResultCard title="Рендер PNG" url={result.png_url} alt="Результат рендера" />
+                  <RenderResultCard title="Маска" url={result.mask_url} alt="Маска объекта" />
+                  <RenderResultCard title="BBox" url={result.bbox_url} alt="Результат с рамкой bbox" />
+                </div>
               ) : null}
             </div>
           ) : null}
@@ -585,11 +740,76 @@ export default function App() {
               Скайбокс (.hdr/.exr, не обязательно)
               <input type="file" accept=".hdr,.exr" disabled={busy} onChange={(e) => e.target.files?.[0] && handleUpload('skybox', e.target.files[0])} />
             </label>
+          </div>
+
+          <div className="panel-block">
+            <h3>Параметры генерации</h3>
+            <div className="dataset-config-grid">
+              <label className="upload-label">
+                Количество изображений
+                <input
+                  type="number"
+                  min={2}
+                  max={5000}
+                  step={1}
+                  value={datasetCount}
+                  disabled={busy}
+                  onChange={(e) => setDatasetCount(Number(e.target.value))}
+                />
+              </label>
+              <label className="upload-label">
+                Ширина
+                <input
+                  type="number"
+                  min={64}
+                  max={4096}
+                  step={1}
+                  value={datasetWidth}
+                  disabled={busy}
+                  onChange={(e) => setDatasetWidth(Number(e.target.value))}
+                />
+              </label>
+              <label className="upload-label">
+                Высота
+                <input
+                  type="number"
+                  min={64}
+                  max={4096}
+                  step={1}
+                  value={datasetHeight}
+                  disabled={busy}
+                  onChange={(e) => setDatasetHeight(Number(e.target.value))}
+                />
+              </label>
+            </div>
+            {datasetJobId ? (
+              <GenerationProgress label={`Прогресс датасета: ${datasetStatusLabel}`} value={datasetProgress} />
+            ) : null}
+            {!datasetConfigValid ? (
+              <p className="dataset-config-error">Допустимо: count 2-5000, width/height 64-4096.</p>
+            ) : null}
             <div className="action-column">
               <button className="primary-btn" disabled={!canRender} onClick={startRender}>
                 {activeTask === 'render' ? <BusyDot /> : null}
                 Рендер 1920x1080
               </button>
+              <button className="secondary-btn" disabled={!canBuildDataset} onClick={startYoloDataset}>
+                {activeTask === 'dataset' ? <BusyDot /> : null}
+                {`YOLO датасет (${datasetCount}, ${datasetResolutionLabel})`}
+              </button>
+              <p className="dataset-status">Статус датасета: {datasetJobId ? datasetStatusLabel : 'Не запускался'}</p>
+            </div>
+          </div>
+
+          <div className="panel-block">
+            <h3>Скачать результаты</h3>
+            <div className="download-actions">
+              <a className={`download-btn render ${result?.png_url ? '' : 'disabled'}`} href={result?.png_url || '#'} target="_blank" rel="noreferrer" aria-disabled={!result?.png_url}>
+                Скачать рендер PNG
+              </a>
+              <a className={`download-btn dataset ${datasetResult?.zip_url ? '' : 'disabled'}`} href={datasetResult?.zip_url || '#'} target="_blank" rel="noreferrer" aria-disabled={!datasetResult?.zip_url}>
+                Скачать датасет ZIP
+              </a>
             </div>
           </div>
 

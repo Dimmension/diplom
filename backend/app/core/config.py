@@ -24,8 +24,15 @@ class Settings(BaseSettings):
     render_width: int = 1920
     render_height: int = 1080
     render_timeout_seconds: int = 60
-    render_require_gpu: bool = False
+    render_require_gpu: bool = True
+    render_samples: int = 64
+    render_use_adaptive_sampling: bool = True
+    render_adaptive_threshold: float = 0.03
+    render_use_denoising: bool = True
+    render_denoiser: str = 'OPTIX'
+    render_max_bounces: int = 4
     celery_worker_concurrency: int = 2
+    dataset_render_parallelism: int = 2
 
 
 @lru_cache

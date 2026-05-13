@@ -22,6 +22,13 @@ class RenderStatus(str, enum.Enum):
     failed = 'failed'
 
 
+class DatasetStatus(str, enum.Enum):
+    queued = 'queued'
+    running = 'running'
+    succeeded = 'succeeded'
+    failed = 'failed'
+
+
 class Asset(Base):
     __tablename__ = 'assets'
 
@@ -61,6 +68,24 @@ class RenderJob(Base):
     result_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     scene_config_used: Mapped[dict] = mapped_column(JSONB, nullable=False)
     scene_config_suggested: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    scene: Mapped[Scene] = relationship('Scene')
+
+
+class YoloDatasetJob(Base):
+    __tablename__ = 'yolo_dataset_jobs'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    scene_id: Mapped[int] = mapped_column(ForeignKey('scenes.id'), nullable=False)
+    status: Mapped[DatasetStatus] = mapped_column(Enum(DatasetStatus), nullable=False, default=DatasetStatus.queued)
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_key: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
