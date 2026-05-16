@@ -37,6 +37,23 @@ class CameraConfig(BaseModel):
     fov_degrees: float = 50.0
 
 
+class CameraJitterConfig(BaseModel):
+    position: Vec3 = Field(default_factory=lambda: Vec3(x=0.8, y=0.8, z=0.4))
+    target: Vec3 = Field(default_factory=lambda: Vec3(x=0.25, y=0.25, z=0.25))
+    fov_degrees: float = 5.0
+    distance_to_object: float = 0.0
+
+
+class EnvironmentJitterConfig(BaseModel):
+    position: Vec3 = Field(default_factory=Vec3)
+    rotation: Vec3 = Field(default_factory=Vec3)
+
+
+class GenerationJitterConfig(BaseModel):
+    camera: CameraJitterConfig = Field(default_factory=CameraJitterConfig)
+    environment: EnvironmentJitterConfig = Field(default_factory=EnvironmentJitterConfig)
+
+
 class AssetTransform(BaseModel):
     position: Vec3 = Field(default_factory=Vec3)
     rotation: Vec3 = Field(default_factory=Vec3)
@@ -47,6 +64,7 @@ class SceneConfig(BaseModel):
     object_transform: AssetTransform = Field(default_factory=AssetTransform)
     environment_transform: AssetTransform = Field(default_factory=AssetTransform)
     camera: CameraConfig = Field(default_factory=CameraConfig)
+    generation_jitter: GenerationJitterConfig = Field(default_factory=GenerationJitterConfig)
     skybox_asset_id: int | None = None
 
 

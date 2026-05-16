@@ -1,7 +1,12 @@
 import axios from 'axios'
 
+const apiBase = import.meta.env.VITE_API_BASE
+if (!apiBase) {
+  throw new Error('VITE_API_BASE is required')
+}
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE || '/v1',
+  baseURL: apiBase,
 })
 
 export async function uploadAsset(kind, file) {

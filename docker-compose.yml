@@ -4,49 +4,57 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "5"
 
+x-api-env: &api-env
+  APP_NAME: '${APP_NAME?APP_NAME_REQUIRED}'
+  API_PREFIX: '${API_PREFIX?API_PREFIX_REQUIRED}'
+  DATABASE_URL: '${DATABASE_URL?DATABASE_URL_REQUIRED}'
+  REDIS_URL: '${REDIS_URL?REDIS_URL_REQUIRED}'
+  S3_ENDPOINT_URL: '${S3_ENDPOINT_URL?S3_ENDPOINT_URL_REQUIRED}'
+  S3_PUBLIC_ENDPOINT_URL: '${S3_PUBLIC_ENDPOINT_URL?S3_PUBLIC_ENDPOINT_URL_REQUIRED}'
+  S3_ACCESS_KEY: '${S3_ACCESS_KEY?S3_ACCESS_KEY_REQUIRED}'
+  S3_SECRET_KEY: '${S3_SECRET_KEY?S3_SECRET_KEY_REQUIRED}'
+  S3_REGION: '${S3_REGION?S3_REGION_REQUIRED}'
+  S3_BUCKET: '${S3_BUCKET?S3_BUCKET_REQUIRED}'
+  S3_PRESIGN_EXPIRE_SECONDS: '${S3_PRESIGN_EXPIRE_SECONDS?S3_PRESIGN_EXPIRE_SECONDS_REQUIRED}'
+  MAX_UPLOAD_SIZE_BYTES: '${MAX_UPLOAD_SIZE_BYTES?MAX_UPLOAD_SIZE_BYTES_REQUIRED}'
+  RENDER_TIMEOUT_SECONDS: '${RENDER_TIMEOUT_SECONDS?RENDER_TIMEOUT_SECONDS_REQUIRED}'
+  RENDER_WIDTH: '${RENDER_WIDTH?RENDER_WIDTH_REQUIRED}'
+  RENDER_HEIGHT: '${RENDER_HEIGHT?RENDER_HEIGHT_REQUIRED}'
+  RENDER_REQUIRE_GPU: '${RENDER_REQUIRE_GPU?RENDER_REQUIRE_GPU_REQUIRED}'
+  RENDER_SAMPLES: '${RENDER_SAMPLES?RENDER_SAMPLES_REQUIRED}'
+  RENDER_USE_ADAPTIVE_SAMPLING: '${RENDER_USE_ADAPTIVE_SAMPLING?RENDER_USE_ADAPTIVE_SAMPLING_REQUIRED}'
+  RENDER_ADAPTIVE_THRESHOLD: '${RENDER_ADAPTIVE_THRESHOLD?RENDER_ADAPTIVE_THRESHOLD_REQUIRED}'
+  RENDER_USE_DENOISING: '${RENDER_USE_DENOISING?RENDER_USE_DENOISING_REQUIRED}'
+  RENDER_DENOISER: '${RENDER_DENOISER?RENDER_DENOISER_REQUIRED}'
+  RENDER_MAX_BOUNCES: '${RENDER_MAX_BOUNCES?RENDER_MAX_BOUNCES_REQUIRED}'
+  CELERY_WORKER_CONCURRENCY: '${CELERY_WORKER_CONCURRENCY?CELERY_WORKER_CONCURRENCY_REQUIRED}'
+  DATASET_RENDER_PARALLELISM: '${DATASET_RENDER_PARALLELISM?DATASET_RENDER_PARALLELISM_REQUIRED}'
+  PYTHONUNBUFFERED: '${PYTHONUNBUFFERED?PYTHONUNBUFFERED_REQUIRED}'
+  TZ: '${TZ?TZ_REQUIRED}'
+
 services:
   frontend:
     build:
       context: ./frontend
     container_name: render_frontend
     environment:
-      VITE_API_BASE: /v1
-      VITE_API_PROXY_TARGET: http://api:8000
-      TZ: Europe/Moscow
+      VITE_API_BASE: '${VITE_API_BASE?VITE_API_BASE_REQUIRED}'
+      VITE_API_PROXY_TARGET: '${VITE_API_PROXY_TARGET?VITE_API_PROXY_TARGET_REQUIRED}'
+      TZ: '${TZ?TZ_REQUIRED}'
     ports:
       - '5173:5173'
     volumes:
       - ./frontend:/app
       - frontend_node_modules:/app/node_modules
     logging: *default-logging
-    depends_on: 
+    depends_on:
       - api
 
   api:
     build:
       context: ./backend
     container_name: render_api
-    environment:
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/renderdb
-      REDIS_URL: redis://redis:6379/0
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
-      S3_BUCKET: render-assets
-      RENDER_TIMEOUT_SECONDS: 60
-      RENDER_WIDTH: 1920
-      RENDER_HEIGHT: 1080
-      RENDER_REQUIRE_GPU: "true"
-      RENDER_SAMPLES: 64
-      RENDER_USE_ADAPTIVE_SAMPLING: "true"
-      RENDER_ADAPTIVE_THRESHOLD: 0.03
-      RENDER_USE_DENOISING: "true"
-      RENDER_DENOISER: OPTIX
-      RENDER_MAX_BOUNCES: 4
-      DATASET_RENDER_PARALLELISM: 2
-      PYTHONUNBUFFERED: "1"
-      TZ: Europe/Moscow
+    environment: *api-env
     ports:
       - '8000:8000'
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --no-access-log
@@ -62,30 +70,11 @@ services:
     build:
       context: ./backend
     container_name: render_worker
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY?CELERY_WORKER_CONCURRENCY_REQUIRED}
     environment:
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/renderdb
-      REDIS_URL: redis://redis:6379/0
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
-      S3_BUCKET: render-assets
-      RENDER_TIMEOUT_SECONDS: 60
-      RENDER_WIDTH: 1920
-      RENDER_HEIGHT: 1080
-      RENDER_REQUIRE_GPU: "true"
-      RENDER_SAMPLES: 64
-      RENDER_USE_ADAPTIVE_SAMPLING: "true"
-      RENDER_ADAPTIVE_THRESHOLD: 0.03
-      RENDER_USE_DENOISING: "true"
-      RENDER_DENOISER: OPTIX
-      RENDER_MAX_BOUNCES: 4
-      DATASET_RENDER_PARALLELISM: 2
-      PYTHONUNBUFFERED: "1"
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      TZ: Europe/Moscow
+      <<: *api-env
+      NVIDIA_VISIBLE_DEVICES: '${NVIDIA_VISIBLE_DEVICES?NVIDIA_VISIBLE_DEVICES_REQUIRED}'
+      NVIDIA_DRIVER_CAPABILITIES: '${NVIDIA_DRIVER_CAPABILITIES?NVIDIA_DRIVER_CAPABILITIES_REQUIRED}'
     gpus: all
     volumes:
       - ./backend/app:/app/app
@@ -98,30 +87,11 @@ services:
   worker2:
     image: diplom_new-worker
     container_name: render_worker2
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY?CELERY_WORKER_CONCURRENCY_REQUIRED}
     environment:
-      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/renderdb
-      REDIS_URL: redis://redis:6379/0
-      S3_ENDPOINT_URL: http://minio:9000
-      S3_PUBLIC_ENDPOINT_URL: http://localhost:9000
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
-      S3_BUCKET: render-assets
-      RENDER_TIMEOUT_SECONDS: 60
-      RENDER_WIDTH: 1920
-      RENDER_HEIGHT: 1080
-      RENDER_REQUIRE_GPU: "true"
-      RENDER_SAMPLES: 64
-      RENDER_USE_ADAPTIVE_SAMPLING: "true"
-      RENDER_ADAPTIVE_THRESHOLD: 0.03
-      RENDER_USE_DENOISING: "true"
-      RENDER_DENOISER: OPTIX
-      RENDER_MAX_BOUNCES: 4
-      DATASET_RENDER_PARALLELISM: 2
-      PYTHONUNBUFFERED: "1"
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      TZ: Europe/Moscow
+      <<: *api-env
+      NVIDIA_VISIBLE_DEVICES: '${NVIDIA_VISIBLE_DEVICES?NVIDIA_VISIBLE_DEVICES_REQUIRED}'
+      NVIDIA_DRIVER_CAPABILITIES: '${NVIDIA_DRIVER_CAPABILITIES?NVIDIA_DRIVER_CAPABILITIES_REQUIRED}'
     gpus: all
     volumes:
       - ./backend/app:/app/app
@@ -135,7 +105,7 @@ services:
     image: redis:7-alpine
     container_name: render_redis
     environment:
-      TZ: Europe/Moscow
+      TZ: '${TZ?TZ_REQUIRED}'
     ports:
       - '6379:6379'
     logging: *default-logging
@@ -144,10 +114,10 @@ services:
     image: postgres:16-alpine
     container_name: render_postgres
     environment:
-      POSTGRES_DB: renderdb
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      TZ: Europe/Moscow
+      POSTGRES_DB: '${POSTGRES_DB?POSTGRES_DB_REQUIRED}'
+      POSTGRES_USER: '${POSTGRES_USER?POSTGRES_USER_REQUIRED}'
+      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD?POSTGRES_PASSWORD_REQUIRED}'
+      TZ: '${TZ?TZ_REQUIRED}'
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
@@ -159,9 +129,9 @@ services:
     container_name: render_minio
     command: server /data --console-address ':9001'
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-      TZ: Europe/Moscow
+      MINIO_ROOT_USER: '${MINIO_ROOT_USER?MINIO_ROOT_USER_REQUIRED}'
+      MINIO_ROOT_PASSWORD: '${MINIO_ROOT_PASSWORD?MINIO_ROOT_PASSWORD_REQUIRED}'
+      TZ: '${TZ?TZ_REQUIRED}'
     volumes:
       - minio_data:/data
     ports:

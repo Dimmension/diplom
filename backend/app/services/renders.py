@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -528,17 +529,70 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _axis_range(source: dict | None, axis: str, fallback: float) -> float:
+    value = fallback if source is None else source.get(axis, fallback)
+    try:
+        return abs(float(value))
+    except (TypeError, ValueError):
+        return abs(float(fallback))
+
+
+def _range_value(value: float | int | None, fallback: float) -> float:
+    if value is None:
+        return abs(float(fallback))
+    try:
+        return abs(float(value))
+    except (TypeError, ValueError):
+        return abs(float(fallback))
+
+
 def _jitter_scene_config(base_scene_config: dict, rng: random.Random) -> dict:
     scene_config = deepcopy(base_scene_config)
+    jitter_cfg = scene_config.get('generation_jitter') or {}
+    camera_jitter = jitter_cfg.get('camera') or {}
+    environment_jitter = jitter_cfg.get('environment') or {}
 
     camera = scene_config['camera']
-    camera['position']['x'] += rng.uniform(-0.8, 0.8)
-    camera['position']['y'] += rng.uniform(-0.8, 0.8)
-    camera['position']['z'] += rng.uniform(-0.4, 0.4)
-    camera['target']['x'] += rng.uniform(-0.25, 0.25)
-    camera['target']['y'] += rng.uniform(-0.25, 0.25)
-    camera['target']['z'] += rng.uniform(-0.25, 0.25)
-    camera['fov_degrees'] = _clamp(float(camera['fov_degrees']) + rng.uniform(-5.0, 5.0), 30.0, 80.0)
+    camera_pos_range = camera_jitter.get('position') or {}
+    camera_target_range = camera_jitter.get('target') or {}
+
+    camera['position']['x'] += rng.uniform(-_axis_range(camera_pos_range, 'x', 0.8), _axis_range(camera_pos_range, 'x', 0.8))
+    camera['position']['y'] += rng.uniform(-_axis_range(camera_pos_range, 'y', 0.8), _axis_range(camera_pos_range, 'y', 0.8))
+    camera['position']['z'] += rng.uniform(-_axis_range(camera_pos_range, 'z', 0.4), _axis_range(camera_pos_range, 'z', 0.4))
+    camera['target']['x'] += rng.uniform(-_axis_range(camera_target_range, 'x', 0.25), _axis_range(camera_target_range, 'x', 0.25))
+    camera['target']['y'] += rng.uniform(-_axis_range(camera_target_range, 'y', 0.25), _axis_range(camera_target_range, 'y', 0.25))
+    camera['target']['z'] += rng.uniform(-_axis_range(camera_target_range, 'z', 0.25), _axis_range(camera_target_range, 'z', 0.25))
+    camera['fov_degrees'] = _clamp(
+        float(camera['fov_degrees']) + rng.uniform(-_range_value(camera_jitter.get('fov_degrees'), 5.0), _range_value(camera_jitter.get('fov_degrees'), 5.0)),
+        30.0,
+        80.0,
+    )
+
+    distance_to_object_range = _range_value(camera_jitter.get('distance_to_object'), 0.0)
+    if distance_to_object_range > 0.0:
+        object_pos = scene_config.get('object_transform', {}).get('position', {})
+        obj_x = float(object_pos.get('x', 0.0))
+        obj_y = float(object_pos.get('y', 0.0))
+        obj_z = float(object_pos.get('z', 0.0))
+
+        cam_x = float(camera['position']['x'])
+        cam_y = float(camera['position']['y'])
+        cam_z = float(camera['position']['z'])
+
+        vx = cam_x - obj_x
+        vy = cam_y - obj_y
+        vz = cam_z - obj_z
+        current_distance = math.sqrt(vx * vx + vy * vy + vz * vz)
+        if current_distance > 1e-6:
+            target_distance = _clamp(
+                current_distance + rng.uniform(-distance_to_object_range, distance_to_object_range),
+                0.1,
+                1000.0,
+            )
+            scale = target_distance / current_distance
+            camera['position']['x'] = obj_x + vx * scale
+            camera['position']['y'] = obj_y + vy * scale
+            camera['position']['z'] = obj_z + vz * scale
 
     obj = scene_config['object_transform']
     obj['position']['x'] += rng.uniform(-0.5, 0.5)
@@ -552,6 +606,17 @@ def _jitter_scene_config(base_scene_config: dict, rng: random.Random) -> dict:
     obj['scale']['x'] = _clamp(float(obj['scale']['x']) * scale_mul, 0.05, 10.0)
     obj['scale']['y'] = _clamp(float(obj['scale']['y']) * scale_mul, 0.05, 10.0)
     obj['scale']['z'] = _clamp(float(obj['scale']['z']) * scale_mul, 0.05, 10.0)
+
+    env = scene_config['environment_transform']
+    env_position_range = environment_jitter.get('position') or {}
+    env_rotation_range = environment_jitter.get('rotation') or {}
+    env['position']['x'] += rng.uniform(-_axis_range(env_position_range, 'x', 0.0), _axis_range(env_position_range, 'x', 0.0))
+    env['position']['y'] += rng.uniform(-_axis_range(env_position_range, 'y', 0.0), _axis_range(env_position_range, 'y', 0.0))
+    env['position']['z'] += rng.uniform(-_axis_range(env_position_range, 'z', 0.0), _axis_range(env_position_range, 'z', 0.0))
+    env['rotation']['x'] += rng.uniform(-_axis_range(env_rotation_range, 'x', 0.0), _axis_range(env_rotation_range, 'x', 0.0))
+    env['rotation']['y'] += rng.uniform(-_axis_range(env_rotation_range, 'y', 0.0), _axis_range(env_rotation_range, 'y', 0.0))
+    env['rotation']['z'] += rng.uniform(-_axis_range(env_rotation_range, 'z', 0.0), _axis_range(env_rotation_range, 'z', 0.0))
+
     return scene_config
 
 

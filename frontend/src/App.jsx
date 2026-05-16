@@ -29,6 +29,18 @@ const defaultConfig = {
     target: { x: 0, y: 0, z: 0 },
     fov_degrees: 50,
   },
+  generation_jitter: {
+    camera: {
+      position: { x: 0.8, y: 0.8, z: 0.4 },
+      target: { x: 0.25, y: 0.25, z: 0.25 },
+      fov_degrees: 5,
+      distance_to_object: 0,
+    },
+    environment: {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+    },
+  },
   skybox_asset_id: null,
 }
 
@@ -781,6 +793,209 @@ export default function App() {
                   onChange={(e) => setDatasetHeight(Number(e.target.value))}
                 />
               </label>
+            </div>
+            <h4>Разброс камеры</h4>
+            <div className="axis-grid">
+              <AxisInput
+                label="Позиция X"
+                value={sceneConfig.generation_jitter.camera.position.x}
+                onChange={(x) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    camera: {
+                      ...prev.generation_jitter.camera,
+                      position: { ...prev.generation_jitter.camera.position, x },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Позиция Y"
+                value={sceneConfig.generation_jitter.camera.position.y}
+                onChange={(y) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    camera: {
+                      ...prev.generation_jitter.camera,
+                      position: { ...prev.generation_jitter.camera.position, y },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Позиция Z"
+                value={sceneConfig.generation_jitter.camera.position.z}
+                onChange={(z) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    camera: {
+                      ...prev.generation_jitter.camera,
+                      position: { ...prev.generation_jitter.camera.position, z },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Цель X"
+                value={sceneConfig.generation_jitter.camera.target.x}
+                onChange={(x) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    camera: {
+                      ...prev.generation_jitter.camera,
+                      target: { ...prev.generation_jitter.camera.target, x },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Цель Y"
+                value={sceneConfig.generation_jitter.camera.target.y}
+                onChange={(y) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    camera: {
+                      ...prev.generation_jitter.camera,
+                      target: { ...prev.generation_jitter.camera.target, y },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Цель Z"
+                value={sceneConfig.generation_jitter.camera.target.z}
+                onChange={(z) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    camera: {
+                      ...prev.generation_jitter.camera,
+                      target: { ...prev.generation_jitter.camera.target, z },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="FOV"
+                value={sceneConfig.generation_jitter.camera.fov_degrees}
+                step={1}
+                onChange={(fov_degrees) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    camera: {
+                      ...prev.generation_jitter.camera,
+                      fov_degrees,
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Дистанция до объекта"
+                value={sceneConfig.generation_jitter.camera.distance_to_object}
+                onChange={(distance_to_object) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    camera: {
+                      ...prev.generation_jitter.camera,
+                      distance_to_object,
+                    },
+                  },
+                }))}
+              />
+            </div>
+            <h4>Разброс окружения (позиция, наклон)</h4>
+            <div className="axis-grid">
+              <AxisInput
+                label="Поз X"
+                value={sceneConfig.generation_jitter.environment.position.x}
+                onChange={(x) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    environment: {
+                      ...prev.generation_jitter.environment,
+                      position: { ...prev.generation_jitter.environment.position, x },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Поз Y"
+                value={sceneConfig.generation_jitter.environment.position.y}
+                onChange={(y) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    environment: {
+                      ...prev.generation_jitter.environment,
+                      position: { ...prev.generation_jitter.environment.position, y },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Поз Z"
+                value={sceneConfig.generation_jitter.environment.position.z}
+                onChange={(z) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    environment: {
+                      ...prev.generation_jitter.environment,
+                      position: { ...prev.generation_jitter.environment.position, z },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Наклон X"
+                value={sceneConfig.generation_jitter.environment.rotation.x}
+                onChange={(x) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    environment: {
+                      ...prev.generation_jitter.environment,
+                      rotation: { ...prev.generation_jitter.environment.rotation, x },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Наклон Y"
+                value={sceneConfig.generation_jitter.environment.rotation.y}
+                onChange={(y) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    environment: {
+                      ...prev.generation_jitter.environment,
+                      rotation: { ...prev.generation_jitter.environment.rotation, y },
+                    },
+                  },
+                }))}
+              />
+              <AxisInput
+                label="Наклон Z"
+                value={sceneConfig.generation_jitter.environment.rotation.z}
+                onChange={(z) => updateSceneConfigLocal((prev) => ({
+                  ...prev,
+                  generation_jitter: {
+                    ...prev.generation_jitter,
+                    environment: {
+                      ...prev.generation_jitter.environment,
+                      rotation: { ...prev.generation_jitter.environment.rotation, z },
+                    },
+                  },
+                }))}
+              />
             </div>
             {datasetJobId ? (
               <GenerationProgress label={`Прогресс датасета: ${datasetStatusLabel}`} value={datasetProgress} />
