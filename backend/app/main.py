@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.db import Base, engine, get_db
-from app.models import AssetKind
+from app.models import AssetKind, DatasetStatus
 from app.schemas import (
     AssetListResponse,
     AssetKindSchema,
@@ -13,16 +13,33 @@ from app.schemas import (
     CreateRenderResponse,
     CreateYoloDatasetRequest,
     CreateYoloDatasetResponse,
+    DatasetStatusSchema,
     CreateSceneRequest,
     RenderResultResponse,
     RenderStatusResponse,
     SceneResponse,
     UpdateSceneConfigRequest,
+    LlmEnhancePreviewRequest,
+    LlmEnhancePreviewResponse,
+    LlmEnhancePreviewItem,
+    CreateLlmEnhanceDatasetRequest,
+    CreateLlmEnhanceDatasetResponse,
+    LlmEnhanceDatasetStatusResponse,
+    LlmEnhanceDatasetResultResponse,
     YoloDatasetResultResponse,
     YoloDatasetResultSummary,
+    YoloDatasetPreviewPair,
+    YoloDatasetListItem,
+    YoloDatasetListResponse,
     YoloDatasetStatusResponse,
 )
 from app.services.assets import list_assets, upload_asset
+from app.services.llm_enhancer import (
+    create_llm_enhance_job,
+    enhance_dataset_samples_with_langgraph,
+    get_llm_enhance_job,
+    get_llm_enhance_job_result,
+)
 from app.services.renders import (
     create_render_job,
     create_yolo_dataset_job,
@@ -30,6 +47,7 @@ from app.services.renders import (
     get_render_job,
     get_render_result,
     get_yolo_dataset_job,
+    list_yolo_dataset_jobs,
     get_yolo_dataset_result,
 )
 from app.services.scenes import create_scene, update_scene_config
@@ -173,6 +191,59 @@ def create_yolo_dataset_endpoint(payload: CreateYoloDatasetRequest, db: Session 
     return CreateYoloDatasetResponse(dataset_job_id=job.id, status=job.status)
 
 
+@app.get(f'{settings.api_prefix}/datasets/yolo', response_model=YoloDatasetListResponse)
+def list_yolo_datasets_endpoint(
+    limit: int = Query(50, ge=1, le=200),
+    status: DatasetStatusSchema | None = Query(None),
+    db: Session = Depends(get_db),
+) -> YoloDatasetListResponse:
+    jobs = list_yolo_dataset_jobs(db, limit=limit, status_filter=DatasetStatus(status.value) if status else None)
+    items = []
+    for job in jobs:
+        config = job.config or {}
+        summary = job.summary or {}
+        preview_keys = summary.get('preview_image_keys') or []
+        preview_image_urls = [storage.presign_get(key) for key in preview_keys if isinstance(key, str)]
+        preview_pairs_raw = summary.get('preview_pairs') or []
+        preview_pairs = []
+        for pair in preview_pairs_raw:
+            if not isinstance(pair, dict):
+                continue
+            image_key = pair.get('image_key')
+            bbox_key = pair.get('bbox_key')
+            mask_key = pair.get('mask_key')
+            if not (isinstance(image_key, str) and isinstance(bbox_key, str) and isinstance(mask_key, str)):
+                continue
+            preview_pairs.append(
+                YoloDatasetPreviewPair(
+                    image_url=storage.presign_get(image_key),
+                    bbox_url=storage.presign_get(bbox_key),
+                    mask_url=storage.presign_get(mask_key),
+                )
+            )
+        items.append(
+            YoloDatasetListItem(
+                dataset_job_id=job.id,
+                status=DatasetStatusSchema(job.status.value),
+                progress=job.progress,
+                count=config.get('count'),
+                width=config.get('width'),
+                height=config.get('height'),
+                split_train_count=config.get('split_train_count'),
+                split_val_count=config.get('split_val_count'),
+                images_total=summary.get('images_total'),
+                empty_labels_count=summary.get('empty_labels_count'),
+                class_names=summary.get('class_names') or [],
+                preview_image_urls=preview_image_urls,
+                preview_pairs=preview_pairs,
+                started_at=job.started_at,
+                updated_at=job.updated_at,
+                error_message=job.error_message,
+            )
+        )
+    return YoloDatasetListResponse(items=items)
+
+
 @app.get(f'{settings.api_prefix}/datasets/yolo/{{dataset_job_id}}', response_model=YoloDatasetStatusResponse)
 def get_yolo_dataset_status_endpoint(dataset_job_id: int, db: Session = Depends(get_db)) -> YoloDatasetStatusResponse:
     job = get_yolo_dataset_job(db, dataset_job_id)
@@ -190,7 +261,55 @@ def get_yolo_dataset_status_endpoint(dataset_job_id: int, db: Session = Depends(
 @app.get(f'{settings.api_prefix}/datasets/yolo/{{dataset_job_id}}/result', response_model=YoloDatasetResultResponse)
 def get_yolo_dataset_result_endpoint(dataset_job_id: int, db: Session = Depends(get_db)) -> YoloDatasetResultResponse:
     zip_url, summary = get_yolo_dataset_result(db, dataset_job_id)
+    preview_keys = summary.get('preview_image_keys') or []
+    preview_urls = [storage.presign_get(key) for key in preview_keys if isinstance(key, str)]
+    summary_payload = {**summary, 'preview_image_urls': preview_urls}
     return YoloDatasetResultResponse(
         zip_url=zip_url,
-        summary=YoloDatasetResultSummary(**summary),
+        summary=YoloDatasetResultSummary(**summary_payload),
+    )
+
+
+@app.post(f'{settings.api_prefix}/llm/enhance-preview', response_model=LlmEnhancePreviewResponse)
+def llm_enhance_preview_endpoint(payload: LlmEnhancePreviewRequest, db: Session = Depends(get_db)) -> LlmEnhancePreviewResponse:
+    items_raw = enhance_dataset_samples_with_langgraph(
+        db=db,
+        dataset_job_id=payload.dataset_job_id,
+        sample_count=payload.sample_count,
+        llm_model=payload.llm_model,
+    )
+    items = [LlmEnhancePreviewItem(**item) for item in items_raw]
+    return LlmEnhancePreviewResponse(dataset_job_id=payload.dataset_job_id, items=items)
+
+
+@app.post(f'{settings.api_prefix}/llm/enhance-dataset', response_model=CreateLlmEnhanceDatasetResponse)
+def create_llm_enhance_dataset_endpoint(payload: CreateLlmEnhanceDatasetRequest, db: Session = Depends(get_db)) -> CreateLlmEnhanceDatasetResponse:
+    job = create_llm_enhance_job(db=db, dataset_job_id=payload.dataset_job_id, llm_model=payload.llm_model)
+    return CreateLlmEnhanceDatasetResponse(enhance_job_id=job.id, status=job.status)
+
+
+@app.get(f'{settings.api_prefix}/llm/enhance-dataset/{{enhance_job_id}}', response_model=LlmEnhanceDatasetStatusResponse)
+def get_llm_enhance_dataset_status_endpoint(enhance_job_id: int, db: Session = Depends(get_db)) -> LlmEnhanceDatasetStatusResponse:
+    job = get_llm_enhance_job(db=db, enhance_job_id=enhance_job_id)
+    return LlmEnhanceDatasetStatusResponse(
+        enhance_job_id=job.id,
+        dataset_job_id=job.dataset_job_id,
+        status=job.status,
+        progress=job.progress,
+        started_at=job.started_at,
+        updated_at=job.updated_at,
+        error_message=job.error_message,
+    )
+
+
+@app.get(f'{settings.api_prefix}/llm/enhance-dataset/{{enhance_job_id}}/result', response_model=LlmEnhanceDatasetResultResponse)
+def get_llm_enhance_dataset_result_endpoint(enhance_job_id: int, db: Session = Depends(get_db)) -> LlmEnhanceDatasetResultResponse:
+    payload = get_llm_enhance_job_result(db=db, enhance_job_id=enhance_job_id)
+    return LlmEnhanceDatasetResultResponse(
+        enhance_job_id=payload['enhance_job_id'],
+        dataset_job_id=payload['dataset_job_id'],
+        status=payload['status'],
+        processed_images=payload['processed_images'],
+        total_images=payload['total_images'],
+        sample_items=[LlmEnhancePreviewItem(**item) for item in payload['sample_items']],
     )

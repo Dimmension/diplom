@@ -534,6 +534,10 @@ export default function App() {
 
   return (
     <div className="page">
+      <header className="top-nav">
+        <a href="/" className="nav-link active">Студия</a>
+        <a href="/llm" className="nav-link">LLM</a>
+      </header>
       <section className="layout">
         <main className="main">
           <div className="viewport-wrap" style={sidebarHeight ? { height: `${sidebarHeight}px` } : undefined}>

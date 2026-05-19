@@ -6,7 +6,7 @@ settings = get_settings()
 
 celery_app = Celery('render_worker', broker=settings.redis_url, backend=settings.redis_url)
 celery_app.conf.update(
-    include=['app.services.renders'],
+    include=['app.services.renders', 'app.services.llm_enhancer'],
     task_track_started=True,
     task_serializer='json',
     result_serializer='json',

@@ -90,3 +90,19 @@ class YoloDatasetJob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     scene: Mapped[Scene] = relationship('Scene')
+
+
+class LlmEnhanceJob(Base):
+    __tablename__ = 'llm_enhance_jobs'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_job_id: Mapped[int] = mapped_column(ForeignKey('yolo_dataset_jobs.id'), nullable=False)
+    status: Mapped[DatasetStatus] = mapped_column(Enum(DatasetStatus), nullable=False, default=DatasetStatus.queued)
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    dataset_job: Mapped[YoloDatasetJob] = relationship('YoloDatasetJob')

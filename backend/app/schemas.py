@@ -159,8 +159,86 @@ class YoloDatasetResultSummary(BaseModel):
     val_count: int
     empty_labels_count: int
     class_names: list[str]
+    preview_image_urls: list[str] = Field(default_factory=list)
 
 
 class YoloDatasetResultResponse(BaseModel):
     zip_url: str
     summary: YoloDatasetResultSummary
+
+
+class YoloDatasetPreviewPair(BaseModel):
+    image_url: str
+    bbox_url: str
+    mask_url: str
+
+
+class YoloDatasetListItem(BaseModel):
+    dataset_job_id: int
+    status: DatasetStatusSchema
+    progress: int
+    count: int | None = None
+    width: int | None = None
+    height: int | None = None
+    split_train_count: int | None = None
+    split_val_count: int | None = None
+    images_total: int | None = None
+    empty_labels_count: int | None = None
+    class_names: list[str] = Field(default_factory=list)
+    preview_image_urls: list[str] = Field(default_factory=list)
+    preview_pairs: list[YoloDatasetPreviewPair] = Field(default_factory=list)
+    started_at: datetime | None
+    updated_at: datetime
+    error_message: str | None = None
+
+
+class YoloDatasetListResponse(BaseModel):
+    items: list[YoloDatasetListItem]
+
+
+class LlmEnhancePreviewRequest(BaseModel):
+    dataset_job_id: int
+    sample_count: int = Field(default=2, ge=1, le=8)
+    llm_model: str = 'gpt-5.4'
+
+
+class LlmEnhancePreviewItem(BaseModel):
+    image_url: str
+    bbox_url: str
+    mask_url: str
+    enhanced_image_url: str
+    enhancement_plan: dict[str, float | str | int | bool]
+
+
+class LlmEnhancePreviewResponse(BaseModel):
+    dataset_job_id: int
+    items: list[LlmEnhancePreviewItem]
+
+
+class CreateLlmEnhanceDatasetRequest(BaseModel):
+    dataset_job_id: int
+    llm_model: str = 'gpt-5.4'
+
+
+class CreateLlmEnhanceDatasetResponse(BaseModel):
+    enhance_job_id: int
+    status: DatasetStatusSchema
+
+
+class LlmEnhanceDatasetStatusResponse(BaseModel):
+    enhance_job_id: int
+    dataset_job_id: int
+    status: DatasetStatusSchema
+    progress: int
+    started_at: datetime | None
+    updated_at: datetime
+    error_message: str | None = None
+
+
+class LlmEnhanceDatasetResultResponse(BaseModel):
+    enhance_job_id: int
+    dataset_job_id: int
+    status: DatasetStatusSchema
+    processed_images: int
+    total_images: int
+    sample_items: list[LlmEnhancePreviewItem]

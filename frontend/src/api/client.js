@@ -55,6 +55,13 @@ export async function createYoloDataset(payload) {
   return data
 }
 
+export async function listYoloDatasets(limit = 50, status) {
+  const { data } = await api.get('/datasets/yolo', {
+    params: { limit, status },
+  })
+  return data.items
+}
+
 export async function getYoloDatasetStatus(datasetJobId) {
   const { data } = await api.get(`/datasets/yolo/${datasetJobId}`)
   return data
@@ -62,5 +69,20 @@ export async function getYoloDatasetStatus(datasetJobId) {
 
 export async function getYoloDatasetResult(datasetJobId) {
   const { data } = await api.get(`/datasets/yolo/${datasetJobId}/result`)
+  return data
+}
+
+export async function createLlmEnhanceDataset(payload) {
+  const { data } = await api.post('/llm/enhance-dataset', payload)
+  return data
+}
+
+export async function getLlmEnhanceDatasetStatus(enhanceJobId) {
+  const { data } = await api.get(`/llm/enhance-dataset/${enhanceJobId}`)
+  return data
+}
+
+export async function getLlmEnhanceDatasetResult(enhanceJobId) {
+  const { data } = await api.get(`/llm/enhance-dataset/${enhanceJobId}/result`)
   return data
 }

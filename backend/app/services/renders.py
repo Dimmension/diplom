@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import mimetypes
 import os
 import random
 import re
@@ -219,11 +220,40 @@ def get_yolo_dataset_job(db: Session, dataset_job_id: int) -> YoloDatasetJob:
     return job
 
 
+def list_yolo_dataset_jobs(db: Session, limit: int = 50, status_filter: DatasetStatus | None = None) -> list[YoloDatasetJob]:
+    query = db.query(YoloDatasetJob)
+    if status_filter is not None:
+        query = query.filter(YoloDatasetJob.status == status_filter)
+    return query.order_by(YoloDatasetJob.updated_at.desc(), YoloDatasetJob.id.desc()).limit(limit).all()
+
+
 def get_yolo_dataset_result(db: Session, dataset_job_id: int) -> tuple[str, dict]:
     job = get_yolo_dataset_job(db, dataset_job_id)
-    if job.status != DatasetStatus.succeeded or not job.result_key:
+    if job.status != DatasetStatus.succeeded:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Dataset generation is not completed yet')
-    return storage.presign_get(job.result_key), (job.summary or {})
+    summary = job.summary or {}
+
+    # Backward compatibility: old jobs store a prebuilt ZIP key.
+    if job.result_key:
+        return storage.presign_get(job.result_key), summary
+
+    dataset_prefix = summary.get('dataset_prefix')
+    if not isinstance(dataset_prefix, str) or not dataset_prefix:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Dataset artifacts are unavailable')
+
+    temp_dir = tempfile.mkdtemp(prefix=f'dataset_download_{dataset_job_id}_')
+    try:
+        zip_path = os.path.join(temp_dir, 'dataset.zip')
+        files_count = _build_dataset_zip_from_storage(dataset_prefix=dataset_prefix, zip_path=zip_path)
+        if files_count == 0:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Dataset artifacts are empty')
+
+        zip_key = f'datasets/yolo/{dataset_job_id}/downloads/dataset.zip'
+        storage.upload_file(zip_path, zip_key, content_type='application/zip')
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return storage.presign_get(zip_key), summary
 
 
 def _set_job_status(job_id: int, *, status_value: RenderStatus, progress: int | None = None, error_code: str | None = None, error_message: str | None = None, result_key: str | None = None) -> None:
@@ -642,13 +672,69 @@ def _bbox_meta_to_yolo_line(meta: dict) -> str | None:
     return f'0 {center_x:.6f} {center_y:.6f} {box_w:.6f} {box_h:.6f}\n'
 
 
-def _zip_tree(src_dir: str, zip_path: str) -> None:
+def _guess_content_type(file_path: str) -> str:
+    guessed, _ = mimetypes.guess_type(file_path)
+    return guessed or 'application/octet-stream'
+
+
+def _upload_tree_to_storage(src_dir: str, prefix: str) -> list[str]:
+    uploaded_keys: list[str] = []
+    for root, _, files in os.walk(src_dir):
+        for file_name in files:
+            abs_path = os.path.join(root, file_name)
+            rel_path = os.path.relpath(abs_path, src_dir).replace(os.sep, '/')
+            key = f'{prefix}/{rel_path}'
+            storage.upload_file(abs_path, key, content_type=_guess_content_type(rel_path))
+            uploaded_keys.append(key)
+    uploaded_keys.sort()
+    return uploaded_keys
+
+
+def _list_storage_keys(prefix: str) -> list[str]:
+    keys: list[str] = []
+    continuation_token: str | None = None
+    while True:
+        params: dict[str, object] = {
+            'Bucket': settings.s3_bucket,
+            'Prefix': f'{prefix.rstrip("/")}/',
+        }
+        if continuation_token:
+            params['ContinuationToken'] = continuation_token
+        payload = storage.client.list_objects_v2(**params)
+        for item in payload.get('Contents', []):
+            key = item.get('Key')
+            if isinstance(key, str) and not key.endswith('/'):
+                keys.append(key)
+        if not payload.get('IsTruncated'):
+            break
+        continuation_token = payload.get('NextContinuationToken')
+        if not continuation_token:
+            break
+    keys.sort()
+    return keys
+
+
+def _build_dataset_zip_from_storage(dataset_prefix: str, zip_path: str) -> int:
+    keys = _list_storage_keys(dataset_prefix)
+    prefix = f'{dataset_prefix.rstrip("/")}/'
+    files_count = 0
+
     with zipfile.ZipFile(zip_path, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(src_dir):
-            for file_name in files:
-                abs_path = os.path.join(root, file_name)
-                rel_path = os.path.relpath(abs_path, src_dir)
-                zf.write(abs_path, rel_path)
+        for key in keys:
+            if not key.startswith(prefix):
+                continue
+            rel_path = key[len(prefix):]
+            if not rel_path:
+                continue
+            obj = storage.client.get_object(Bucket=settings.s3_bucket, Key=key)
+            body = obj.get('Body')
+            if body is None:
+                continue
+            data = body.read()
+            zf.writestr(rel_path, data)
+            files_count += 1
+
+    return files_count
 
 
 @celery_app.task(name='app.services.renders.run_yolo_dataset_job')
@@ -859,12 +945,54 @@ def run_yolo_dataset_job(dataset_job_id: int) -> None:
             fh.write('names:\n')
             fh.write('  0: object\n')
 
-        _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=98)
-        logger.info('Dataset job %s: packing ZIP', dataset_job_id)
-        zip_path = os.path.join(workspace_dir, 'yolo_dataset.zip')
-        _zip_tree(dataset_root, zip_path)
-        result_key = f'datasets/yolo/{dataset_job_id}/dataset.zip'
-        storage.upload_file(zip_path, result_key, content_type='application/zip')
+        preview_indices: list[int] = []
+        preview_target = min(8, count)
+        if preview_target == 1:
+            preview_indices = [0]
+        elif preview_target > 1:
+            for i in range(preview_target):
+                idx = round(i * (count - 1) / (preview_target - 1))
+                if idx not in preview_indices:
+                    preview_indices.append(idx)
+
+        _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=97)
+        dataset_prefix = f'datasets/yolo/{dataset_job_id}/dataset'
+        uploaded_keys = _upload_tree_to_storage(dataset_root, dataset_prefix)
+        uploaded_keys_set = set(uploaded_keys)
+        logger.info('Dataset job %s: dataset files uploaded (%s)', dataset_job_id, len(uploaded_keys))
+
+        preview_pairs: list[dict] = []
+        preview_candidates: list[dict] = []
+        for idx in range(count):
+            split, _ = sample_index[idx]
+            image_path = dataset_samples[idx]['output_path']
+            stem = os.path.splitext(os.path.basename(image_path))[0]
+            image_key = f'{dataset_prefix}/images/{split}/{stem}.png'
+            bbox_key = f'{dataset_prefix}/debug/bbox/{split}/{stem}.png'
+            mask_key = f'{dataset_prefix}/debug/mask/{split}/{stem}.png'
+            if image_key in uploaded_keys_set and bbox_key in uploaded_keys_set and mask_key in uploaded_keys_set:
+                preview_candidates.append(
+                    {
+                        'image_key': image_key,
+                        'bbox_key': bbox_key,
+                        'mask_key': mask_key,
+                    }
+                )
+
+        if preview_candidates:
+            pick_count = min(2, len(preview_candidates))
+            preview_pairs = random.sample(preview_candidates, k=pick_count)
+
+        preview_image_keys: list[str] = []
+        if preview_pairs:
+            preview_image_keys = [pair['image_key'] for pair in preview_pairs]
+        else:
+            for idx in preview_indices:
+                image_path = dataset_samples[idx]['output_path']
+                rel_path = os.path.relpath(image_path, dataset_root).replace(os.sep, '/')
+                key = f'{dataset_prefix}/{rel_path}'
+                if key in uploaded_keys_set:
+                    preview_image_keys.append(key)
 
         summary = {
             'images_total': count,
@@ -872,12 +1000,14 @@ def run_yolo_dataset_job(dataset_job_id: int) -> None:
             'val_count': val_count,
             'empty_labels_count': empty_labels,
             'class_names': ['object'],
+            'dataset_prefix': dataset_prefix,
+            'preview_image_keys': preview_image_keys,
+            'preview_pairs': preview_pairs,
         }
         _set_dataset_job_status(
             dataset_job_id,
             status_value=DatasetStatus.succeeded,
             progress=100,
-            result_key=result_key,
             summary=summary,
         )
         logger.info(
