@@ -5,14 +5,8 @@ import {
   getLlmEnhanceDatasetStatus,
   listYoloDatasets,
 } from './api/client'
-
-function datasetStatusLabel(status) {
-  if (status === 'queued') return 'В очереди'
-  if (status === 'running') return 'Генерируется'
-  if (status === 'succeeded') return 'Готов'
-  if (status === 'failed') return 'Ошибка'
-  return status || 'Неизвестно'
-}
+import { useJobPolling } from './hooks/useJobPolling'
+import { getApiErrorMessage, getLlmStatusLabel } from './utils/status'
 
 function formatDate(value) {
   if (!value) return '—'
@@ -47,7 +41,7 @@ export default function LlmPage() {
         return String(items[0].dataset_job_id)
       })
     } catch (err) {
-      setError(err.response?.data?.detail || err.message)
+      setError(getApiErrorMessage(err))
     } finally {
       setLoading(false)
     }
@@ -75,48 +69,35 @@ export default function LlmPage() {
       setEnhanceStatus(created.status)
       setEnhanceProgress(0)
     } catch (err) {
-      setError(err.response?.data?.detail || err.message)
+      setError(getApiErrorMessage(err))
       setEnhanceRunning(false)
     }
   }
 
-  useEffect(() => {
-    if (!enhanceJobId) return undefined
-
-    let cancelled = false
-    const timer = setInterval(async () => {
-      try {
-        const statusPayload = await getLlmEnhanceDatasetStatus(enhanceJobId)
-        if (cancelled) return
-        setEnhanceStatus(statusPayload.status)
-        setEnhanceProgress(statusPayload.progress ?? 0)
-
-        if (statusPayload.status === 'succeeded') {
-          const result = await getLlmEnhanceDatasetResult(enhanceJobId)
-          if (cancelled) return
-          setEnhanceResultItems(result.sample_items || [])
-          setEnhanceRunning(false)
-          clearInterval(timer)
-        }
-
-        if (statusPayload.status === 'failed') {
-          setError(statusPayload.error_message || 'Ошибка улучшения датасета')
-          setEnhanceRunning(false)
-          clearInterval(timer)
-        }
-      } catch (err) {
-        if (cancelled) return
-        setError(err.response?.data?.detail || err.message)
-        setEnhanceRunning(false)
-        clearInterval(timer)
-      }
-    }, 3000)
-
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [enhanceJobId])
+  useJobPolling({
+    jobId: enhanceJobId,
+    intervalMs: 3000,
+    pollFn: getLlmEnhanceDatasetStatus,
+    onPoll: (statusPayload) => {
+      setEnhanceStatus(statusPayload.status)
+      setEnhanceProgress(statusPayload.progress ?? 0)
+    },
+    isSuccess: (statusPayload) => statusPayload.status === 'succeeded',
+    isFailure: (statusPayload) => statusPayload.status === 'failed',
+    onSuccess: async (_statusPayload, currentJobId) => {
+      const result = await getLlmEnhanceDatasetResult(currentJobId)
+      setEnhanceResultItems(result.sample_items || [])
+      setEnhanceRunning(false)
+    },
+    onFailure: (statusPayload) => {
+      setError(statusPayload.error_message || 'Ошибка улучшения датасета')
+      setEnhanceRunning(false)
+    },
+    onError: (err) => {
+      setError(getApiErrorMessage(err))
+      setEnhanceRunning(false)
+    },
+  })
 
   const preview = {
     image_urls: selectedDataset?.preview_image_urls || [],
@@ -145,7 +126,7 @@ export default function LlmPage() {
               {!datasets.length ? <option value="">Нет датасетов</option> : null}
               {datasets.map((dataset) => (
                 <option key={dataset.dataset_job_id} value={dataset.dataset_job_id}>
-                  {`#${dataset.dataset_job_id} · ${datasetStatusLabel(dataset.status)} · ${dataset.width || '?'}x${dataset.height || '?'}`}
+                  {`#${dataset.dataset_job_id} · ${getLlmStatusLabel(dataset.status)} · ${dataset.width || '?'}x${dataset.height || '?'}`}
                 </option>
               ))}
             </select>
@@ -165,7 +146,7 @@ export default function LlmPage() {
 
           {selectedDataset ? (
             <div className="llm-meta">
-              <p><strong>Статус:</strong> {datasetStatusLabel(selectedDataset.status)}</p>
+              <p><strong>Статус:</strong> {getLlmStatusLabel(selectedDataset.status)}</p>
               <p><strong>Обновлен:</strong> {formatDate(selectedDataset.updated_at)}</p>
               <p><strong>Прогресс:</strong> {selectedDataset.progress}%</p>
             </div>
@@ -174,7 +155,7 @@ export default function LlmPage() {
           {enhanceJobId ? (
             <div className="llm-meta">
               <p><strong>Enhance job:</strong> #{enhanceJobId}</p>
-              <p><strong>Статус:</strong> {datasetStatusLabel(enhanceStatus)}</p>
+              <p><strong>Статус:</strong> {getLlmStatusLabel(enhanceStatus)}</p>
               <p><strong>Прогресс:</strong> {enhanceProgress}%</p>
             </div>
           ) : null}

@@ -234,6 +234,76 @@ def _skybox_content_type(ext: str) -> str:
     return 'application/octet-stream'
 
 
+def _persist_asset(
+    *,
+    db: Session,
+    kind: AssetKind,
+    filename: str,
+    ext: str,
+    size_bytes: int,
+    original_key: str,
+    preview_key: str,
+) -> Asset:
+    asset = Asset(
+        kind=kind,
+        original_filename=filename,
+        detected_format=ext,
+        size_bytes=size_bytes,
+        original_key=original_key,
+        preview_glb_key=preview_key,
+    )
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+    return asset
+
+
+def _resolve_zip_entrypoint(local_original_path: str, source_root: str, filename: str) -> tuple[str, str, str]:
+    _safe_extract_zip(local_original_path, source_root)
+    _expand_nested_zip_archives(source_root)
+    entry_abs_path, entry_rel_path = _resolve_entrypoint_from_archive(source_root, filename)
+    entry_ext = Path(entry_abs_path).suffix.lower().lstrip('.')
+    return entry_abs_path, entry_rel_path, entry_ext
+
+
+def _resolve_single_file_entrypoint(local_original_path: str, source_root: str, filename: str, ext: str) -> tuple[str, str, str]:
+    entry_abs_path = os.path.join(source_root, Path(filename).name)
+    shutil.copy2(local_original_path, entry_abs_path)
+    entry_rel_path = Path(filename).name
+    return entry_abs_path, entry_rel_path, ext
+
+
+def _resolve_upload_entrypoint(local_original_path: str, source_root: str, filename: str, ext: str) -> tuple[str, str, str]:
+    resolver_map = {
+        'zip': lambda: _resolve_zip_entrypoint(local_original_path, source_root, filename),
+    }
+    resolver = resolver_map.get(ext, lambda: _resolve_single_file_entrypoint(local_original_path, source_root, filename, ext))
+    return resolver()
+
+
+def _upload_skybox_asset(
+    *,
+    db: Session,
+    kind: AssetKind,
+    filename: str,
+    ext: str,
+    size_bytes: int,
+    local_original_path: str,
+    asset_uuid: str,
+) -> Asset:
+    original_key = f'assets/{kind.value}/{asset_uuid}/source/{Path(filename).name}'
+    storage.upload_file(local_original_path, original_key, content_type=_skybox_content_type(ext))
+    return _persist_asset(
+        db=db,
+        kind=kind,
+        filename=filename,
+        ext=ext,
+        size_bytes=size_bytes,
+        original_key=original_key,
+        preview_key=original_key,
+    )
+
+
 async def upload_asset(db: Session, kind: AssetKind, upload: UploadFile) -> Asset:
     if not upload.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Filename is required')
@@ -248,33 +318,27 @@ async def upload_asset(db: Session, kind: AssetKind, upload: UploadFile) -> Asse
     preview_path = local_original_path
     try:
         asset_uuid = uuid.uuid4().hex
-        if kind == AssetKind.skybox:
-            original_key = f'assets/{kind.value}/{asset_uuid}/source/{Path(upload.filename).name}'
-            preview_key = original_key
-            storage.upload_file(local_original_path, original_key, content_type=_skybox_content_type(ext))
-            asset = Asset(
+        kind_handlers = {
+            AssetKind.skybox: lambda: _upload_skybox_asset(
+                db=db,
                 kind=kind,
-                original_filename=upload.filename,
-                detected_format=ext,
+                filename=upload.filename,
+                ext=ext,
                 size_bytes=size_bytes,
-                original_key=original_key,
-                preview_glb_key=preview_key,
-            )
-            db.add(asset)
-            db.commit()
-            db.refresh(asset)
-            return asset
+                local_original_path=local_original_path,
+                asset_uuid=asset_uuid,
+            ),
+        }
+        kind_handler = kind_handlers.get(kind)
+        if kind_handler is not None:
+            return kind_handler()
 
-        if ext == 'zip':
-            _safe_extract_zip(local_original_path, source_root)
-            _expand_nested_zip_archives(source_root)
-            entry_abs_path, entry_rel_path = _resolve_entrypoint_from_archive(source_root, upload.filename)
-            entry_ext = Path(entry_abs_path).suffix.lower().lstrip('.')
-        else:
-            entry_abs_path = os.path.join(source_root, Path(upload.filename).name)
-            shutil.copy2(local_original_path, entry_abs_path)
-            entry_rel_path = Path(upload.filename).name
-            entry_ext = ext
+        entry_abs_path, entry_rel_path, entry_ext = _resolve_upload_entrypoint(
+            local_original_path=local_original_path,
+            source_root=source_root,
+            filename=upload.filename,
+            ext=ext,
+        )
 
         preview_path = _ensure_preview_glb(entry_abs_path, entry_ext)
         _build_source_package(source_root, entry_rel_path, package_path)
@@ -291,17 +355,15 @@ async def upload_asset(db: Session, kind: AssetKind, upload: UploadFile) -> Asse
                 detail=f'Preview file missing after conversion: {err}',
             ) from err
 
-        asset = Asset(
+        asset = _persist_asset(
+            db=db,
             kind=kind,
-            original_filename=upload.filename,
-            detected_format=ext,
+            filename=upload.filename,
+            ext=ext,
             size_bytes=size_bytes,
             original_key=original_key,
-            preview_glb_key=preview_key,
+            preview_key=preview_key,
         )
-        db.add(asset)
-        db.commit()
-        db.refresh(asset)
         return asset
     finally:
         for path in {local_original_path, preview_path}:

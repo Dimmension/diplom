@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import io
 import random
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -16,16 +18,60 @@ from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.models import DatasetStatus, LlmEnhanceJob, YoloDatasetJob
 from app.services.render_queue import celery_app
+from app.services.storage_helpers import list_object_keys
 from app.storage import storage
 
 settings = get_settings()
+_thread_local = threading.local()
 
 
 class EnhanceState(TypedDict, total=False):
     image_bytes: bytes
     mime_type: str
+    mask_bytes: bytes
+    mask_mime_type: str
     llm_prompt: str
     enhanced_image_bytes: bytes
+
+
+def _storage_list_keys_adapter(prefix: str) -> list[str]:
+    return list_object_keys(storage_client=storage.client, bucket=settings.s3_bucket, prefix=prefix)
+
+
+def _storage_get_object_adapter(key: str) -> dict[str, Any]:
+    return storage.client.get_object(Bucket=settings.s3_bucket, Key=key)
+
+
+def _storage_upload_bytes_adapter(payload: bytes, key: str, *, content_type: str) -> None:
+    storage.upload_bytes(payload, key, content_type=content_type)
+
+
+def _storage_presign_get_adapter(key: str) -> str:
+    return storage.presign_get(key)
+
+
+def _create_openai_client_adapter() -> Any:
+    from openai import OpenAI
+
+    return OpenAI()
+
+
+def _openai_edit_image_adapter(image_client: Any, *, image: io.BytesIO, mask: io.BytesIO, prompt: str) -> Any:
+    return image_client.images.edit(
+        model='gpt-image-1.5',
+        image=image,
+        mask=mask,
+        prompt=prompt,
+        size='640x640',
+        quality='high',
+        output_format='png',
+    )
+
+
+def _http_get_bytes_adapter(url: str, *, timeout: int) -> bytes:
+    response = httpx.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response.content
 
 
 def _build_enhancer_graph(llm_model: str):
@@ -33,7 +79,7 @@ def _build_enhancer_graph(llm_model: str):
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_openai import ChatOpenAI
         from langgraph.graph import END, START, StateGraph
-        from openai import OpenAI
+        image_client = _create_openai_client_adapter()
     except ImportError as err:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -41,7 +87,6 @@ def _build_enhancer_graph(llm_model: str):
         ) from err
 
     llm = ChatOpenAI(model=llm_model, temperature=0)
-    image_client = OpenAI()
 
     def build_edit_prompt(state: EnhanceState) -> dict[str, Any]:
         image_bytes = state['image_bytes']
@@ -56,7 +101,6 @@ def _build_enhancer_graph(llm_model: str):
             'Target look: photo captured by a real camera/photo camera, highly photorealistic, high-quality, natural lighting and textures, non-CGI appearance. '
             'Never request crop, resize, rotation, warp, perspective change, object relocation, or new objects. '
             'Never change composition. Keep bbox/mask alignment valid.'
-            'transform into anime-drone girls'
         )
 
         response = llm.invoke(
@@ -90,20 +134,21 @@ def _build_enhancer_graph(llm_model: str):
         mime_type = state.get('mime_type') or 'image/png'
         file_like = io.BytesIO(state['image_bytes'])
         file_like.name = _mime_to_name(mime_type)
-        response = image_client.images.edit(
-            model='gpt-image-2',
+        mask_mime_type = state.get('mask_mime_type') or 'image/png'
+        mask_file_like = io.BytesIO(state['mask_bytes'])
+        mask_file_like.name = _mime_to_name(mask_mime_type)
+        response = _openai_edit_image_adapter(
+            image_client,
             image=file_like,
+            mask=mask_file_like,
             prompt=state['llm_prompt'],
-            output_format='png',
         )
 
         data0 = response.data[0]
         if getattr(data0, 'b64_json', None):
             return {'enhanced_image_bytes': base64.b64decode(data0.b64_json)}
         if getattr(data0, 'url', None):
-            img = httpx.get(data0.url, timeout=120)
-            img.raise_for_status()
-            return {'enhanced_image_bytes': img.content}
+            return {'enhanced_image_bytes': _http_get_bytes_adapter(data0.url, timeout=120)}
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Image model returned no image payload')
 
     graph_builder = StateGraph(EnhanceState)
@@ -115,38 +160,52 @@ def _build_enhancer_graph(llm_model: str):
     return graph_builder.compile()
 
 
-def _list_keys(prefix: str) -> list[str]:
-    base_prefix = f"{prefix.rstrip('/')}/"
-    keys: list[str] = []
-    continuation_token: str | None = None
+def _get_thread_enhancer_graph(llm_model: str):
+    cache = getattr(_thread_local, 'enhancer_graph_cache', None)
+    if not isinstance(cache, dict):
+        cache = {}
+        _thread_local.enhancer_graph_cache = cache
+    graph = cache.get(llm_model)
+    if graph is None:
+        graph = _build_enhancer_graph(llm_model=llm_model)
+        cache[llm_model] = graph
+    return graph
 
-    while True:
-        params: dict[str, Any] = {
-            'Bucket': settings.s3_bucket,
-            'Prefix': base_prefix,
+
+def _resolve_llm_enhance_parallelism(total_items: int) -> int:
+    if total_items <= 1:
+        return 1
+    configured = int(settings.llm_enhance_parallelism or 4)
+    return max(1, min(configured, total_items))
+
+
+def _enhance_triplet_with_graph(triplet: dict[str, str], *, llm_model: str) -> dict[str, Any]:
+    graph = _get_thread_enhancer_graph(llm_model=llm_model)
+    image_bytes, mime_type = _read_object_bytes(triplet['image_key'])
+    mask_bytes, mask_mime_type = _read_object_bytes(triplet['mask_key'])
+    final_state = graph.invoke(
+        {
+            'image_bytes': image_bytes,
+            'mime_type': mime_type,
+            'mask_bytes': mask_bytes,
+            'mask_mime_type': mask_mime_type,
         }
-        if continuation_token:
-            params['ContinuationToken'] = continuation_token
+    )
+    enhanced_bytes = final_state.get('enhanced_image_bytes')
+    if not isinstance(enhanced_bytes, (bytes, bytearray)):
+        raise RuntimeError('Enhancer graph returned no output image bytes')
+    return {
+        'enhanced_bytes': bytes(enhanced_bytes),
+        'edit_prompt': str(final_state.get('llm_prompt') or ''),
+    }
 
-        payload = storage.client.list_objects_v2(**params)
-        for item in payload.get('Contents', []):
-            key = item.get('Key')
-            if isinstance(key, str) and not key.endswith('/'):
-                keys.append(key)
 
-        if not payload.get('IsTruncated'):
-            break
-
-        continuation_token = payload.get('NextContinuationToken')
-        if not continuation_token:
-            break
-
-    keys.sort()
-    return keys
+def _list_keys(prefix: str) -> list[str]:
+    return _storage_list_keys_adapter(prefix)
 
 
 def _read_object_bytes(key: str) -> tuple[bytes, str]:
-    payload = storage.client.get_object(Bucket=settings.s3_bucket, Key=key)
+    payload = _storage_get_object_adapter(key)
     body = payload.get('Body')
     if body is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'S3 object body is empty: {key}')
@@ -248,42 +307,40 @@ def enhance_dataset_samples_with_langgraph(
 ) -> list[dict[str, Any]]:
     dataset_prefix = _get_dataset_prefix_or_raise(dataset_job_id=dataset_job_id, db=db)
     triplets = _select_random_triplets(dataset_prefix=dataset_prefix, sample_count=sample_count)
-    graph = _build_enhancer_graph(llm_model=llm_model)
+    workers = _resolve_llm_enhance_parallelism(len(triplets))
 
-    response_items: list[dict[str, Any]] = []
+    response_items_by_index: dict[int, dict[str, Any]] = {}
     batch_id = uuid.uuid4().hex
 
-    for index, triplet in enumerate(triplets, start=1):
-        image_bytes, mime_type = _read_object_bytes(triplet['image_key'])
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_meta: dict[Future[dict[str, Any]], tuple[int, dict[str, str]]] = {
+            pool.submit(_enhance_triplet_with_graph, triplet, llm_model=llm_model): (index, triplet)
+            for index, triplet in enumerate(triplets, start=1)
+        }
+        for future in as_completed(future_to_meta):
+            index, triplet = future_to_meta[future]
+            try:
+                result = future.result()
+            except HTTPException:
+                raise
+            except Exception as err:  # noqa: BLE001
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(err)) from err
 
-        final_state = graph.invoke(
-            {
-                'image_bytes': image_bytes,
-                'mime_type': mime_type,
-            }
-        )
-        enhanced_bytes = final_state.get('enhanced_image_bytes')
-        if not isinstance(enhanced_bytes, (bytes, bytearray)):
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail='Enhancer graph returned no output image bytes')
-
-        enhanced_key = f'datasets/yolo/{dataset_job_id}/enhanced/{batch_id}/sample_{index:02d}.png'
-        storage.upload_bytes(bytes(enhanced_bytes), enhanced_key, content_type='image/png')
-
-        response_items.append(
-            {
-                'image_url': storage.presign_get(triplet['image_key']),
-                'bbox_url': storage.presign_get(triplet['bbox_key']),
-                'mask_url': storage.presign_get(triplet['mask_key']),
-                'enhanced_image_url': storage.presign_get(enhanced_key),
+            enhanced_key = f'datasets/yolo/{dataset_job_id}/enhanced/{batch_id}/sample_{index:02d}.png'
+            _storage_upload_bytes_adapter(result['enhanced_bytes'], enhanced_key, content_type='image/png')
+            response_items_by_index[index] = {
+                'image_url': _storage_presign_get_adapter(triplet['image_key']),
+                'bbox_url': _storage_presign_get_adapter(triplet['bbox_key']),
+                'mask_url': _storage_presign_get_adapter(triplet['mask_key']),
+                'enhanced_image_url': _storage_presign_get_adapter(enhanced_key),
                 'enhancement_plan': {
                     'llm_model': llm_model,
                     'image_model': 'gpt-image-1.5',
-                    'edit_prompt': final_state.get('llm_prompt') or '',
+                    'edit_prompt': result['edit_prompt'],
                 },
             }
-        )
 
-    return response_items
+    return [response_items_by_index[idx] for idx in sorted(response_items_by_index.keys())]
 
 
 def create_llm_enhance_job(db: Session, dataset_job_id: int, llm_model: str) -> LlmEnhanceJob:
@@ -329,10 +386,10 @@ def get_llm_enhance_job_result(db: Session, enhance_job_id: int) -> dict[str, An
             continue
         items.append(
             {
-                'image_url': storage.presign_get(image_key),
-                'bbox_url': storage.presign_get(bbox_key),
-                'mask_url': storage.presign_get(mask_key),
-                'enhanced_image_url': storage.presign_get(enhanced_key),
+                'image_url': _storage_presign_get_adapter(image_key),
+                'bbox_url': _storage_presign_get_adapter(bbox_key),
+                'mask_url': _storage_presign_get_adapter(mask_key),
+                'enhanced_image_url': _storage_presign_get_adapter(enhanced_key),
                 'enhancement_plan': plan,
             }
         )
@@ -361,47 +418,57 @@ def run_llm_enhance_job(enhance_job_id: int) -> None:
         dataset_prefix = _get_dataset_prefix_or_raise(dataset_job_id=job.dataset_job_id, db=db)
         triplets = _collect_triplets(dataset_prefix=dataset_prefix)
         total = len(triplets)
-        graph = _build_enhancer_graph(llm_model=llm_model)
+        workers = _resolve_llm_enhance_parallelism(total)
 
         run_id = uuid.uuid4().hex
         enhanced_prefix = f'datasets/yolo/{job.dataset_job_id}/enhanced_full/{run_id}'
 
         sample_for_preview = random.sample(triplets, k=min(2, total))
         sample_keys = {(x['image_key'], x['bbox_key'], x['mask_key']) for x in sample_for_preview}
-        sample_pairs: list[dict[str, Any]] = []
+        sample_pairs_with_index: list[tuple[int, dict[str, Any]]] = []
+        processed_count = 0
+        images_prefix = f'{dataset_prefix.rstrip("/")}/images/'
 
-        for idx, triplet in enumerate(triplets, start=1):
-            image_bytes, mime_type = _read_object_bytes(triplet['image_key'])
-            final_state = graph.invoke({'image_bytes': image_bytes, 'mime_type': mime_type})
-            enhanced_bytes = final_state.get('enhanced_image_bytes')
-            if not isinstance(enhanced_bytes, (bytes, bytearray)):
-                raise RuntimeError('Enhancer graph returned no output image bytes')
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_meta: dict[Future[dict[str, Any]], tuple[int, dict[str, str]]] = {
+                pool.submit(_enhance_triplet_with_graph, triplet, llm_model=llm_model): (idx, triplet)
+                for idx, triplet in enumerate(triplets, start=1)
+            }
 
-            rel = triplet['image_key'][len(f'{dataset_prefix.rstrip("/")}/images/'):]
-            enhanced_key = f'{enhanced_prefix}/images/{rel}'
-            storage.upload_bytes(bytes(enhanced_bytes), enhanced_key, content_type='image/png')
+            for future in as_completed(future_to_meta):
+                idx, triplet = future_to_meta[future]
+                result = future.result()
+                rel = triplet['image_key'][len(images_prefix):]
+                enhanced_key = f'{enhanced_prefix}/images/{rel}'
+                _storage_upload_bytes_adapter(result['enhanced_bytes'], enhanced_key, content_type='image/png')
 
-            if (triplet['image_key'], triplet['bbox_key'], triplet['mask_key']) in sample_keys:
-                sample_pairs.append(
-                    {
-                        'image_key': triplet['image_key'],
-                        'bbox_key': triplet['bbox_key'],
-                        'mask_key': triplet['mask_key'],
-                        'enhanced_key': enhanced_key,
-                        'enhancement_plan': {
-                            'llm_model': llm_model,
-                            'image_model': 'gpt-image-1.5',
-                            'edit_prompt': final_state.get('llm_prompt') or '',
-                        },
-                    }
+                if (triplet['image_key'], triplet['bbox_key'], triplet['mask_key']) in sample_keys:
+                    sample_pairs_with_index.append(
+                        (
+                            idx,
+                            {
+                                'image_key': triplet['image_key'],
+                                'bbox_key': triplet['bbox_key'],
+                                'mask_key': triplet['mask_key'],
+                                'enhanced_key': enhanced_key,
+                                'enhancement_plan': {
+                                    'llm_model': llm_model,
+                                    'image_model': 'gpt-image-1.5',
+                                    'edit_prompt': result['edit_prompt'],
+                                },
+                            },
+                        )
+                    )
+
+                processed_count += 1
+                progress = 2 + int((processed_count / max(total, 1)) * 96)
+                _set_enhance_job_status(
+                    enhance_job_id,
+                    status_value=DatasetStatus.running,
+                    progress=min(progress, 98),
                 )
 
-            progress = 2 + int((idx / max(total, 1)) * 96)
-            _set_enhance_job_status(
-                enhance_job_id,
-                status_value=DatasetStatus.running,
-                progress=min(progress, 98),
-            )
+        sample_pairs = [item for _, item in sorted(sample_pairs_with_index, key=lambda pair: pair[0])]
 
         _set_enhance_job_status(
             enhance_job_id,

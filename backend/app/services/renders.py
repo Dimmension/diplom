@@ -16,6 +16,7 @@ import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -28,6 +29,7 @@ from app.core.db import SessionLocal
 from app.models import Asset, AssetKind, DatasetStatus, RenderJob, RenderStatus, Scene, YoloDatasetJob
 from app.schemas import CreateYoloDatasetRequest, SceneConfig
 from app.services.render_queue import celery_app
+from app.services.storage_helpers import list_object_keys
 from app.storage import storage
 
 settings = get_settings()
@@ -45,6 +47,63 @@ class GpuUnavailableError(RenderTaskError):
 
 GPU_CHECK_CACHE_TTL_SECONDS = 30.0
 _gpu_check_cache: tuple[float, bool, str | None] | None = None
+
+
+@dataclass(frozen=True)
+class _DatasetJobConfig:
+    count: int
+    train_count: int
+    val_count: int
+    include_debug: bool
+    width: int
+    height: int
+    base_scene_config: dict
+    parallel_workers: int
+
+
+@dataclass(frozen=True)
+class _DatasetWorkspace:
+    dataset_root: str
+    debug_mask_base: str
+    debug_bbox_base: str
+    aux_mask_base: str
+    aux_bbox_base: str
+    aux_meta_base: str
+
+
+@dataclass(frozen=True)
+class _DatasetPreparedSamples:
+    dataset_samples: list[dict]
+    sample_index: list[tuple[str, str]]
+    sample_output_to_meta: dict[str, tuple[int, str, str]]
+
+
+def _run_subprocess_adapter(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, **kwargs)
+
+
+def _spawn_subprocess_adapter(command: list[str], **kwargs) -> subprocess.Popen[str]:
+    return subprocess.Popen(command, **kwargs)
+
+
+def _storage_download_file_adapter(object_key: str, local_path: str) -> None:
+    storage.download_file(object_key, local_path)
+
+
+def _storage_upload_file_adapter(local_path: str, key: str, *, content_type: str) -> None:
+    storage.upload_file(local_path, key, content_type=content_type)
+
+
+def _storage_presign_get_adapter(key: str) -> str:
+    return storage.presign_get(key)
+
+
+def _storage_list_keys_adapter(prefix: str) -> list[str]:
+    return list_object_keys(storage_client=storage.client, bucket=settings.s3_bucket, prefix=prefix)
+
+
+def _storage_get_object_adapter(key: str) -> dict:
+    return storage.client.get_object(Bucket=settings.s3_bucket, Key=key)
 
 
 def _ensure_render_worker_available() -> None:
@@ -115,7 +174,7 @@ sys.exit(0)
     probe_cmd = ['blender', '-b', '--python-expr', probe_script]
 
     try:
-        result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=20, check=False)
+        result = _run_subprocess_adapter(probe_cmd, capture_output=True, text=True, timeout=20, check=False)
     except subprocess.TimeoutExpired as err:
         message = 'GPU probe timed out before render start'
         _gpu_check_cache = (now, False, message)
@@ -172,13 +231,13 @@ def get_render_result(db: Session, render_job_id: int) -> tuple[RenderJob, str]:
     render_job = get_render_job(db, render_job_id)
     if render_job.status != RenderStatus.succeeded or not render_job.result_key:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Render is not completed yet')
-    return render_job, storage.presign_get(render_job.result_key)
+    return render_job, _storage_presign_get_adapter(render_job.result_key)
 
 
 def get_additional_render_urls(render_job_id: int) -> tuple[str, str]:
     mask_key = f'renders/{render_job_id}/mask.png'
     bbox_key = f'renders/{render_job_id}/bbox.png'
-    return storage.presign_get(mask_key), storage.presign_get(bbox_key)
+    return _storage_presign_get_adapter(mask_key), _storage_presign_get_adapter(bbox_key)
 
 
 def create_yolo_dataset_job(db: Session, payload: CreateYoloDatasetRequest) -> YoloDatasetJob:
@@ -235,7 +294,7 @@ def get_yolo_dataset_result(db: Session, dataset_job_id: int) -> tuple[str, dict
 
     # Backward compatibility: old jobs store a prebuilt ZIP key.
     if job.result_key:
-        return storage.presign_get(job.result_key), summary
+        return _storage_presign_get_adapter(job.result_key), summary
 
     dataset_prefix = summary.get('dataset_prefix')
     if not isinstance(dataset_prefix, str) or not dataset_prefix:
@@ -249,11 +308,11 @@ def get_yolo_dataset_result(db: Session, dataset_job_id: int) -> tuple[str, dict
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Dataset artifacts are empty')
 
         zip_key = f'datasets/yolo/{dataset_job_id}/downloads/dataset.zip'
-        storage.upload_file(zip_path, zip_key, content_type='application/zip')
+        _storage_upload_file_adapter(zip_path, zip_key, content_type='application/zip')
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-    return storage.presign_get(zip_key), summary
+    return _storage_presign_get_adapter(zip_key), summary
 
 
 def _set_job_status(job_id: int, *, status_value: RenderStatus, progress: int | None = None, error_code: str | None = None, error_message: str | None = None, result_key: str | None = None) -> None:
@@ -373,10 +432,10 @@ def _run_blenderproc_render(
         return entry_abs
 
     try:
-        storage.download_file(object_key, object_local)
-        storage.download_file(environment_key, environment_local)
+        _storage_download_file_adapter(object_key, object_local)
+        _storage_download_file_adapter(environment_key, environment_local)
         if skybox_key and skybox_local:
-            storage.download_file(skybox_key, skybox_local)
+            _storage_download_file_adapter(skybox_key, skybox_local)
         object_entrypoint = resolve_asset_entrypoint(object_local, 'object_src')
         environment_entrypoint = resolve_asset_entrypoint(environment_local, 'environment_src')
 
@@ -407,7 +466,7 @@ def _run_blenderproc_render(
 
         script_path = Path(__file__).resolve().parents[1] / 'scripts' / 'render_with_blenderproc.py'
         cmd = ['blenderproc', 'run', str(script_path), config_local]
-        process = subprocess.Popen(
+        process = _spawn_subprocess_adapter(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -512,9 +571,9 @@ def run_render_job(render_job_id: int) -> None:
         result_key = f'renders/{render_job_id}/final.png'
         mask_key = f'renders/{render_job_id}/mask.png'
         bbox_key = f'renders/{render_job_id}/bbox.png'
-        storage.upload_file(temp_output, result_key, content_type='image/png')
-        storage.upload_file(temp_mask, mask_key, content_type='image/png')
-        storage.upload_file(temp_bbox, bbox_key, content_type='image/png')
+        _storage_upload_file_adapter(temp_output, result_key, content_type='image/png')
+        _storage_upload_file_adapter(temp_mask, mask_key, content_type='image/png')
+        _storage_upload_file_adapter(temp_bbox, bbox_key, content_type='image/png')
         _set_job_status(render_job_id, status_value=RenderStatus.succeeded, progress=100, result_key=result_key)
         logger.info(
             'Render job %s: total pipeline completed in %.2fs',
@@ -684,34 +743,14 @@ def _upload_tree_to_storage(src_dir: str, prefix: str) -> list[str]:
             abs_path = os.path.join(root, file_name)
             rel_path = os.path.relpath(abs_path, src_dir).replace(os.sep, '/')
             key = f'{prefix}/{rel_path}'
-            storage.upload_file(abs_path, key, content_type=_guess_content_type(rel_path))
+            _storage_upload_file_adapter(abs_path, key, content_type=_guess_content_type(rel_path))
             uploaded_keys.append(key)
     uploaded_keys.sort()
     return uploaded_keys
 
 
 def _list_storage_keys(prefix: str) -> list[str]:
-    keys: list[str] = []
-    continuation_token: str | None = None
-    while True:
-        params: dict[str, object] = {
-            'Bucket': settings.s3_bucket,
-            'Prefix': f'{prefix.rstrip("/")}/',
-        }
-        if continuation_token:
-            params['ContinuationToken'] = continuation_token
-        payload = storage.client.list_objects_v2(**params)
-        for item in payload.get('Contents', []):
-            key = item.get('Key')
-            if isinstance(key, str) and not key.endswith('/'):
-                keys.append(key)
-        if not payload.get('IsTruncated'):
-            break
-        continuation_token = payload.get('NextContinuationToken')
-        if not continuation_token:
-            break
-    keys.sort()
-    return keys
+    return _storage_list_keys_adapter(prefix)
 
 
 def _build_dataset_zip_from_storage(dataset_prefix: str, zip_path: str) -> int:
@@ -726,7 +765,7 @@ def _build_dataset_zip_from_storage(dataset_prefix: str, zip_path: str) -> int:
             rel_path = key[len(prefix):]
             if not rel_path:
                 continue
-            obj = storage.client.get_object(Bucket=settings.s3_bucket, Key=key)
+            obj = _storage_get_object_adapter(key)
             body = obj.get('Body')
             if body is None:
                 continue
@@ -735,6 +774,334 @@ def _build_dataset_zip_from_storage(dataset_prefix: str, zip_path: str) -> int:
             files_count += 1
 
     return files_count
+
+
+def _parse_dataset_job_config(dataset_job_id: int, config: dict) -> _DatasetJobConfig:
+    count = int(config['count'])
+    train_count = int(config['split_train_count'])
+    val_count = int(config['split_val_count'])
+    if train_count + val_count != count:
+        raise RenderTaskError('Invalid split configuration')
+
+    include_debug = bool(config.get('include_debug', True))
+    width = int(config['width'])
+    height = int(config['height'])
+    base_scene_config = config['scene_config_snapshot']
+    parallel_workers = max(1, min(int(settings.dataset_render_parallelism), count))
+
+    logger.info(
+        'Dataset job %s START: count=%s train=%s val=%s include_debug=%s size=%sx%s parallel_workers=%s',
+        dataset_job_id,
+        count,
+        train_count,
+        val_count,
+        include_debug,
+        width,
+        height,
+        parallel_workers,
+    )
+    return _DatasetJobConfig(
+        count=count,
+        train_count=train_count,
+        val_count=val_count,
+        include_debug=include_debug,
+        width=width,
+        height=height,
+        base_scene_config=base_scene_config,
+        parallel_workers=parallel_workers,
+    )
+
+
+def _create_dataset_workspace(workspace_dir: str, *, include_debug: bool) -> _DatasetWorkspace:
+    dataset_root = os.path.join(workspace_dir, 'dataset')
+    os.makedirs(os.path.join(dataset_root, 'images', 'train'), exist_ok=True)
+    os.makedirs(os.path.join(dataset_root, 'images', 'val'), exist_ok=True)
+    os.makedirs(os.path.join(dataset_root, 'labels', 'train'), exist_ok=True)
+    os.makedirs(os.path.join(dataset_root, 'labels', 'val'), exist_ok=True)
+
+    debug_mask_base = os.path.join(dataset_root, 'debug', 'mask')
+    debug_bbox_base = os.path.join(dataset_root, 'debug', 'bbox')
+    if include_debug:
+        os.makedirs(os.path.join(debug_mask_base, 'train'), exist_ok=True)
+        os.makedirs(os.path.join(debug_mask_base, 'val'), exist_ok=True)
+        os.makedirs(os.path.join(debug_bbox_base, 'train'), exist_ok=True)
+        os.makedirs(os.path.join(debug_bbox_base, 'val'), exist_ok=True)
+
+    aux_mask_base = os.path.join(workspace_dir, 'aux_mask')
+    aux_bbox_base = os.path.join(workspace_dir, 'aux_bbox')
+    aux_meta_base = os.path.join(workspace_dir, 'meta')
+    os.makedirs(aux_mask_base, exist_ok=True)
+    os.makedirs(aux_bbox_base, exist_ok=True)
+    os.makedirs(aux_meta_base, exist_ok=True)
+
+    return _DatasetWorkspace(
+        dataset_root=dataset_root,
+        debug_mask_base=debug_mask_base,
+        debug_bbox_base=debug_bbox_base,
+        aux_mask_base=aux_mask_base,
+        aux_bbox_base=aux_bbox_base,
+        aux_meta_base=aux_meta_base,
+    )
+
+
+def _prepare_dataset_samples(
+    *,
+    dataset_job_id: int,
+    job_config: _DatasetJobConfig,
+    workspace: _DatasetWorkspace,
+) -> _DatasetPreparedSamples:
+    rng = random.Random(dataset_job_id)
+    dataset_samples: list[dict] = []
+    sample_index: list[tuple[str, str]] = []
+    sample_output_to_meta: dict[str, tuple[int, str, str]] = {}
+
+    for idx in range(job_config.count):
+        split = 'train' if idx < job_config.train_count else 'val'
+        stem = f'{idx:05d}'
+        image_path = os.path.join(workspace.dataset_root, 'images', split, f'{stem}.png')
+        label_path = os.path.join(workspace.dataset_root, 'labels', split, f'{stem}.txt')
+
+        if job_config.include_debug:
+            mask_path = os.path.join(workspace.debug_mask_base, split, f'{stem}.png')
+            bbox_path = os.path.join(workspace.debug_bbox_base, split, f'{stem}.png')
+        else:
+            mask_path = os.path.join(workspace.aux_mask_base, f'{stem}.png')
+            bbox_path = os.path.join(workspace.aux_bbox_base, f'{stem}.png')
+        meta_path = os.path.join(workspace.aux_meta_base, f'{stem}.json')
+
+        jittered_scene = _jitter_scene_config(job_config.base_scene_config, rng)
+        dataset_samples.append(
+            {
+                'scene_config': jittered_scene,
+                'output_path': image_path,
+                'mask_output_path': mask_path,
+                'bbox_output_path': bbox_path,
+                'bbox_meta_output_path': meta_path,
+            }
+        )
+        sample_index.append((split, label_path))
+        sample_output_to_meta[os.path.normpath(image_path)] = (idx + 1, split, stem)
+
+    logger.info('Dataset job %s: prepared %s scene samples', dataset_job_id, job_config.count)
+    return _DatasetPreparedSamples(
+        dataset_samples=dataset_samples,
+        sample_index=sample_index,
+        sample_output_to_meta=sample_output_to_meta,
+    )
+
+
+def _split_dataset_samples(dataset_samples: list[dict], *, parallel_workers: int) -> list[list[dict]]:
+    chunk_map: dict[int, list[dict]] = {idx: [] for idx in range(parallel_workers)}
+    for idx, sample in enumerate(dataset_samples):
+        chunk_map[idx % parallel_workers].append(sample)
+    return [chunk_map[idx] for idx in range(parallel_workers) if chunk_map[idx]]
+
+
+def _render_dataset_samples_stage(
+    *,
+    dataset_job_id: int,
+    job_config: _DatasetJobConfig,
+    prepared_samples: _DatasetPreparedSamples,
+    object_key: str,
+    environment_key: str,
+    skybox_key: str | None,
+) -> int:
+    _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=25)
+    completed_output_paths: set[str] = set()
+    progress_lock = threading.Lock()
+    chunks = _split_dataset_samples(prepared_samples.dataset_samples, parallel_workers=job_config.parallel_workers)
+
+    def log_image_start(sample: dict) -> None:
+        normalized_path = os.path.normpath(sample['output_path'])
+        meta = prepared_samples.sample_output_to_meta.get(normalized_path)
+        if meta is None:
+            return
+        ordinal, split, stem = meta
+        logger.info(
+            'Dataset job %s | IMAGE %s/%s START | split=%s file=%s',
+            dataset_job_id,
+            ordinal,
+            job_config.count,
+            split,
+            f'{stem}.png',
+        )
+
+    def mark_image_done(saved_path: str) -> None:
+        normalized_path = os.path.normpath(saved_path)
+        meta = prepared_samples.sample_output_to_meta.get(normalized_path)
+        if meta is None:
+            return
+        with progress_lock:
+            if normalized_path in completed_output_paths:
+                return
+            completed_output_paths.add(normalized_path)
+            done = len(completed_output_paths)
+            progress_pct = (done / job_config.count) * 100.0
+            job_progress = 25 + int((done * 60) / job_config.count)
+            job_progress = max(25, min(85, job_progress))
+            _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=job_progress)
+        ordinal, split, stem = meta
+        logger.info(
+            'Dataset job %s | IMAGE %s/%s END | done=%.2f%% | split=%s file=%s | progress=%s%%',
+            dataset_job_id,
+            ordinal,
+            job_config.count,
+            progress_pct,
+            split,
+            f'{stem}.png',
+            job_progress,
+        )
+
+    def render_chunk(chunk_idx: int, chunk_samples: list[dict]) -> None:
+        cursor = 0
+        log_image_start(chunk_samples[cursor])
+
+        def on_saved_output(saved_path: str) -> None:
+            nonlocal cursor
+            mark_image_done(saved_path)
+            cursor += 1
+            if cursor < len(chunk_samples):
+                log_image_start(chunk_samples[cursor])
+
+        _run_blenderproc_render(
+            object_key=object_key,
+            environment_key=environment_key,
+            skybox_key=skybox_key,
+            scene_config=job_config.base_scene_config,
+            output_path=chunk_samples[0]['output_path'],
+            width=job_config.width,
+            height=job_config.height,
+            samples=chunk_samples,
+            on_saved_output=on_saved_output,
+        )
+        logger.info(
+            'Dataset job %s: chunk %s finished (%s images)',
+            dataset_job_id,
+            chunk_idx + 1,
+            len(chunk_samples),
+        )
+
+    logger.info('Dataset job %s: launching %s parallel render chunks', dataset_job_id, len(chunks))
+    with ThreadPoolExecutor(max_workers=len(chunks), thread_name_prefix=f'dataset_{dataset_job_id}') as pool:
+        futures = [pool.submit(render_chunk, idx, chunk) for idx, chunk in enumerate(chunks)]
+        for future in futures:
+            future.result()
+
+    _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=90)
+    return len(completed_output_paths)
+
+
+def _write_dataset_labels(dataset_samples: list[dict], sample_index: list[tuple[str, str]]) -> int:
+    empty_labels = 0
+    for idx, (_, label_path) in enumerate(sample_index):
+        meta_path = dataset_samples[idx]['bbox_meta_output_path']
+        with open(meta_path, 'r', encoding='utf-8') as fh:
+            meta = json.load(fh)
+        yolo_line = _bbox_meta_to_yolo_line(meta)
+        if yolo_line is None:
+            empty_labels += 1
+            with open(label_path, 'w', encoding='utf-8') as fh:
+                fh.write('')
+        else:
+            with open(label_path, 'w', encoding='utf-8') as fh:
+                fh.write(yolo_line)
+    return empty_labels
+
+
+def _write_dataset_data_yaml(dataset_root: str) -> None:
+    with open(os.path.join(dataset_root, 'data.yaml'), 'w', encoding='utf-8') as fh:
+        fh.write('path: .\n')
+        fh.write('train: images/train\n')
+        fh.write('val: images/val\n')
+        fh.write('nc: 1\n')
+        fh.write('names:\n')
+        fh.write('  0: object\n')
+
+
+def _build_preview_indices(count: int) -> list[int]:
+    preview_indices: list[int] = []
+    preview_target = min(8, count)
+    if preview_target == 1:
+        preview_indices = [0]
+    elif preview_target > 1:
+        for i in range(preview_target):
+            idx = round(i * (count - 1) / (preview_target - 1))
+            if idx not in preview_indices:
+                preview_indices.append(idx)
+    return preview_indices
+
+
+def _build_preview_pairs(
+    *,
+    dataset_prefix: str,
+    uploaded_keys_set: set[str],
+    prepared_samples: _DatasetPreparedSamples,
+    count: int,
+) -> list[dict]:
+    preview_candidates: list[dict] = []
+    for idx in range(count):
+        split, _ = prepared_samples.sample_index[idx]
+        image_path = prepared_samples.dataset_samples[idx]['output_path']
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        image_key = f'{dataset_prefix}/images/{split}/{stem}.png'
+        bbox_key = f'{dataset_prefix}/debug/bbox/{split}/{stem}.png'
+        mask_key = f'{dataset_prefix}/debug/mask/{split}/{stem}.png'
+        if image_key in uploaded_keys_set and bbox_key in uploaded_keys_set and mask_key in uploaded_keys_set:
+            preview_candidates.append(
+                {
+                    'image_key': image_key,
+                    'bbox_key': bbox_key,
+                    'mask_key': mask_key,
+                }
+            )
+
+    if not preview_candidates:
+        return []
+
+    pick_count = min(2, len(preview_candidates))
+    return random.sample(preview_candidates, k=pick_count)
+
+
+def _build_preview_image_keys(
+    *,
+    preview_pairs: list[dict],
+    preview_indices: list[int],
+    prepared_samples: _DatasetPreparedSamples,
+    dataset_root: str,
+    dataset_prefix: str,
+    uploaded_keys_set: set[str],
+) -> list[str]:
+    if preview_pairs:
+        return [pair['image_key'] for pair in preview_pairs]
+
+    preview_image_keys: list[str] = []
+    for idx in preview_indices:
+        image_path = prepared_samples.dataset_samples[idx]['output_path']
+        rel_path = os.path.relpath(image_path, dataset_root).replace(os.sep, '/')
+        key = f'{dataset_prefix}/{rel_path}'
+        if key in uploaded_keys_set:
+            preview_image_keys.append(key)
+    return preview_image_keys
+
+
+def _build_dataset_summary(
+    *,
+    job_config: _DatasetJobConfig,
+    empty_labels: int,
+    dataset_prefix: str,
+    preview_image_keys: list[str],
+    preview_pairs: list[dict],
+) -> dict:
+    return {
+        'images_total': job_config.count,
+        'train_count': job_config.train_count,
+        'val_count': job_config.val_count,
+        'empty_labels_count': empty_labels,
+        'class_names': ['object'],
+        'dataset_prefix': dataset_prefix,
+        'preview_image_keys': preview_image_keys,
+        'preview_pairs': preview_pairs,
+    }
 
 
 @celery_app.task(name='app.services.renders.run_yolo_dataset_job')
@@ -748,262 +1115,74 @@ def run_yolo_dataset_job(dataset_job_id: int) -> None:
         if job is None:
             return
 
-        config = job.config or {}
         scene = db.query(Scene).filter(Scene.id == job.scene_id).first()
         if scene is None:
             raise RenderTaskError('Scene not found for dataset job')
 
-        count = int(config['count'])
-        train_count = int(config['split_train_count'])
-        val_count = int(config['split_val_count'])
-        if train_count + val_count != count:
-            raise RenderTaskError('Invalid split configuration')
+        config = job.config or {}
+        job_config = _parse_dataset_job_config(dataset_job_id, config)
 
-        include_debug = bool(config.get('include_debug', True))
-        width = int(config['width'])
-        height = int(config['height'])
-        base_scene_config = config['scene_config_snapshot']
-        parallel_workers = max(1, min(int(settings.dataset_render_parallelism), count))
-        logger.info(
-            'Dataset job %s START: count=%s train=%s val=%s include_debug=%s size=%sx%s parallel_workers=%s',
-            dataset_job_id,
-            count,
-            train_count,
-            val_count,
-            include_debug,
-            width,
-            height,
-            parallel_workers,
-        )
-
-        object_asset, env_asset, skybox_asset = _load_scene_assets(db, scene, base_scene_config)
+        object_asset, env_asset, skybox_asset = _load_scene_assets(db, scene, job_config.base_scene_config)
         _run_gpu_probe()
         _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=15)
 
-        dataset_root = os.path.join(workspace_dir, 'dataset')
-        os.makedirs(os.path.join(dataset_root, 'images', 'train'), exist_ok=True)
-        os.makedirs(os.path.join(dataset_root, 'images', 'val'), exist_ok=True)
-        os.makedirs(os.path.join(dataset_root, 'labels', 'train'), exist_ok=True)
-        os.makedirs(os.path.join(dataset_root, 'labels', 'val'), exist_ok=True)
+        workspace = _create_dataset_workspace(workspace_dir, include_debug=job_config.include_debug)
+        prepared_samples = _prepare_dataset_samples(
+            dataset_job_id=dataset_job_id,
+            job_config=job_config,
+            workspace=workspace,
+        )
 
-        debug_mask_base = os.path.join(dataset_root, 'debug', 'mask')
-        debug_bbox_base = os.path.join(dataset_root, 'debug', 'bbox')
-        if include_debug:
-            os.makedirs(os.path.join(debug_mask_base, 'train'), exist_ok=True)
-            os.makedirs(os.path.join(debug_mask_base, 'val'), exist_ok=True)
-            os.makedirs(os.path.join(debug_bbox_base, 'train'), exist_ok=True)
-            os.makedirs(os.path.join(debug_bbox_base, 'val'), exist_ok=True)
+        rendered_images = _render_dataset_samples_stage(
+            dataset_job_id=dataset_job_id,
+            job_config=job_config,
+            prepared_samples=prepared_samples,
+            object_key=object_asset.original_key,
+            environment_key=env_asset.original_key,
+            skybox_key=skybox_asset.original_key if skybox_asset else None,
+        )
+        logger.info(
+            'Dataset job %s: render stage completed. rendered_images=%s/%s',
+            dataset_job_id,
+            rendered_images,
+            job_config.count,
+        )
 
-        aux_mask_base = os.path.join(workspace_dir, 'aux_mask')
-        aux_bbox_base = os.path.join(workspace_dir, 'aux_bbox')
-        aux_meta_base = os.path.join(workspace_dir, 'meta')
-        os.makedirs(aux_mask_base, exist_ok=True)
-        os.makedirs(aux_bbox_base, exist_ok=True)
-        os.makedirs(aux_meta_base, exist_ok=True)
-
-        rng = random.Random(dataset_job_id)
-        dataset_samples: list[dict] = []
-        sample_index: list[tuple[str, str]] = []
-        sample_output_to_meta: dict[str, tuple[int, str, str]] = {}
-        for idx in range(count):
-            split = 'train' if idx < train_count else 'val'
-            stem = f'{idx:05d}'
-            image_path = os.path.join(dataset_root, 'images', split, f'{stem}.png')
-            label_path = os.path.join(dataset_root, 'labels', split, f'{stem}.txt')
-
-            if include_debug:
-                mask_path = os.path.join(debug_mask_base, split, f'{stem}.png')
-                bbox_path = os.path.join(debug_bbox_base, split, f'{stem}.png')
-            else:
-                mask_path = os.path.join(aux_mask_base, f'{stem}.png')
-                bbox_path = os.path.join(aux_bbox_base, f'{stem}.png')
-            meta_path = os.path.join(aux_meta_base, f'{stem}.json')
-
-            jittered_scene = _jitter_scene_config(base_scene_config, rng)
-            dataset_samples.append(
-                {
-                    'scene_config': jittered_scene,
-                    'output_path': image_path,
-                    'mask_output_path': mask_path,
-                    'bbox_output_path': bbox_path,
-                    'bbox_meta_output_path': meta_path,
-                }
-            )
-            sample_index.append((split, label_path))
-            sample_output_to_meta[os.path.normpath(image_path)] = (idx + 1, split, stem)
-
-        logger.info('Dataset job %s: prepared %s scene samples', dataset_job_id, count)
-
-        _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=25)
-        completed_output_paths: set[str] = set()
-        progress_lock = threading.Lock()
-        chunk_map: dict[int, list[dict]] = {idx: [] for idx in range(parallel_workers)}
-        for idx, sample in enumerate(dataset_samples):
-            chunk_map[idx % parallel_workers].append(sample)
-        chunks = [chunk_map[idx] for idx in range(parallel_workers) if chunk_map[idx]]
-
-        def log_image_start(sample: dict) -> None:
-            normalized_path = os.path.normpath(sample['output_path'])
-            meta = sample_output_to_meta.get(normalized_path)
-            if meta is None:
-                return
-            ordinal, split, stem = meta
-            logger.info(
-                'Dataset job %s | IMAGE %s/%s START | split=%s file=%s',
-                dataset_job_id,
-                ordinal,
-                count,
-                split,
-                f'{stem}.png',
-            )
-
-        def mark_image_done(saved_path: str) -> None:
-            normalized_path = os.path.normpath(saved_path)
-            meta = sample_output_to_meta.get(normalized_path)
-            if meta is None:
-                return
-            with progress_lock:
-                if normalized_path in completed_output_paths:
-                    return
-                completed_output_paths.add(normalized_path)
-                done = len(completed_output_paths)
-                progress_pct = (done / count) * 100.0
-                job_progress = 25 + int((done * 60) / count)
-                job_progress = max(25, min(85, job_progress))
-                _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=job_progress)
-            ordinal, split, stem = meta
-            logger.info(
-                'Dataset job %s | IMAGE %s/%s END | done=%.2f%% | split=%s file=%s | progress=%s%%',
-                dataset_job_id,
-                ordinal,
-                count,
-                progress_pct,
-                split,
-                f'{stem}.png',
-                job_progress,
-            )
-
-        def render_chunk(chunk_idx: int, chunk_samples: list[dict]) -> None:
-            cursor = 0
-            log_image_start(chunk_samples[cursor])
-
-            def on_saved_output(saved_path: str) -> None:
-                nonlocal cursor
-                mark_image_done(saved_path)
-                cursor += 1
-                if cursor < len(chunk_samples):
-                    log_image_start(chunk_samples[cursor])
-
-            _run_blenderproc_render(
-                object_key=object_asset.original_key,
-                environment_key=env_asset.original_key,
-                skybox_key=skybox_asset.original_key if skybox_asset else None,
-                scene_config=base_scene_config,
-                output_path=chunk_samples[0]['output_path'],
-                width=width,
-                height=height,
-                samples=chunk_samples,
-                on_saved_output=on_saved_output,
-            )
-            logger.info(
-                'Dataset job %s: chunk %s finished (%s images)',
-                dataset_job_id,
-                chunk_idx + 1,
-                len(chunk_samples),
-            )
-
-        logger.info('Dataset job %s: launching %s parallel render chunks', dataset_job_id, len(chunks))
-        with ThreadPoolExecutor(max_workers=len(chunks), thread_name_prefix=f'dataset_{dataset_job_id}') as pool:
-            futures = [pool.submit(render_chunk, idx, chunk) for idx, chunk in enumerate(chunks)]
-            for future in futures:
-                future.result()
-
-        _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=90)
-        logger.info('Dataset job %s: render stage completed. rendered_images=%s/%s', dataset_job_id, len(completed_output_paths), count)
-
-        empty_labels = 0
-        for idx, (_, label_path) in enumerate(sample_index):
-            meta_path = dataset_samples[idx]['bbox_meta_output_path']
-            with open(meta_path, 'r', encoding='utf-8') as fh:
-                meta = json.load(fh)
-            yolo_line = _bbox_meta_to_yolo_line(meta)
-            if yolo_line is None:
-                empty_labels += 1
-                with open(label_path, 'w', encoding='utf-8') as fh:
-                    fh.write('')
-            else:
-                with open(label_path, 'w', encoding='utf-8') as fh:
-                    fh.write(yolo_line)
+        empty_labels = _write_dataset_labels(prepared_samples.dataset_samples, prepared_samples.sample_index)
         _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=95)
         logger.info('Dataset job %s: labels generated, empty_labels=%s', dataset_job_id, empty_labels)
 
-        with open(os.path.join(dataset_root, 'data.yaml'), 'w', encoding='utf-8') as fh:
-            fh.write('path: .\n')
-            fh.write('train: images/train\n')
-            fh.write('val: images/val\n')
-            fh.write('nc: 1\n')
-            fh.write('names:\n')
-            fh.write('  0: object\n')
-
-        preview_indices: list[int] = []
-        preview_target = min(8, count)
-        if preview_target == 1:
-            preview_indices = [0]
-        elif preview_target > 1:
-            for i in range(preview_target):
-                idx = round(i * (count - 1) / (preview_target - 1))
-                if idx not in preview_indices:
-                    preview_indices.append(idx)
+        _write_dataset_data_yaml(workspace.dataset_root)
+        preview_indices = _build_preview_indices(job_config.count)
 
         _set_dataset_job_status(dataset_job_id, status_value=DatasetStatus.running, progress=97)
         dataset_prefix = f'datasets/yolo/{dataset_job_id}/dataset'
-        uploaded_keys = _upload_tree_to_storage(dataset_root, dataset_prefix)
+        uploaded_keys = _upload_tree_to_storage(workspace.dataset_root, dataset_prefix)
         uploaded_keys_set = set(uploaded_keys)
         logger.info('Dataset job %s: dataset files uploaded (%s)', dataset_job_id, len(uploaded_keys))
 
-        preview_pairs: list[dict] = []
-        preview_candidates: list[dict] = []
-        for idx in range(count):
-            split, _ = sample_index[idx]
-            image_path = dataset_samples[idx]['output_path']
-            stem = os.path.splitext(os.path.basename(image_path))[0]
-            image_key = f'{dataset_prefix}/images/{split}/{stem}.png'
-            bbox_key = f'{dataset_prefix}/debug/bbox/{split}/{stem}.png'
-            mask_key = f'{dataset_prefix}/debug/mask/{split}/{stem}.png'
-            if image_key in uploaded_keys_set and bbox_key in uploaded_keys_set and mask_key in uploaded_keys_set:
-                preview_candidates.append(
-                    {
-                        'image_key': image_key,
-                        'bbox_key': bbox_key,
-                        'mask_key': mask_key,
-                    }
-                )
+        preview_pairs = _build_preview_pairs(
+            dataset_prefix=dataset_prefix,
+            uploaded_keys_set=uploaded_keys_set,
+            prepared_samples=prepared_samples,
+            count=job_config.count,
+        )
+        preview_image_keys = _build_preview_image_keys(
+            preview_pairs=preview_pairs,
+            preview_indices=preview_indices,
+            prepared_samples=prepared_samples,
+            dataset_root=workspace.dataset_root,
+            dataset_prefix=dataset_prefix,
+            uploaded_keys_set=uploaded_keys_set,
+        )
 
-        if preview_candidates:
-            pick_count = min(2, len(preview_candidates))
-            preview_pairs = random.sample(preview_candidates, k=pick_count)
-
-        preview_image_keys: list[str] = []
-        if preview_pairs:
-            preview_image_keys = [pair['image_key'] for pair in preview_pairs]
-        else:
-            for idx in preview_indices:
-                image_path = dataset_samples[idx]['output_path']
-                rel_path = os.path.relpath(image_path, dataset_root).replace(os.sep, '/')
-                key = f'{dataset_prefix}/{rel_path}'
-                if key in uploaded_keys_set:
-                    preview_image_keys.append(key)
-
-        summary = {
-            'images_total': count,
-            'train_count': train_count,
-            'val_count': val_count,
-            'empty_labels_count': empty_labels,
-            'class_names': ['object'],
-            'dataset_prefix': dataset_prefix,
-            'preview_image_keys': preview_image_keys,
-            'preview_pairs': preview_pairs,
-        }
+        summary = _build_dataset_summary(
+            job_config=job_config,
+            empty_labels=empty_labels,
+            dataset_prefix=dataset_prefix,
+            preview_image_keys=preview_image_keys,
+            preview_pairs=preview_pairs,
+        )
         _set_dataset_job_status(
             dataset_job_id,
             status_value=DatasetStatus.succeeded,
@@ -1013,9 +1192,9 @@ def run_yolo_dataset_job(dataset_job_id: int) -> None:
         logger.info(
             'Dataset job %s END: completed. images_total=%s train=%s val=%s empty_labels=%s',
             dataset_job_id,
-            count,
-            train_count,
-            val_count,
+            job_config.count,
+            job_config.train_count,
+            job_config.val_count,
             empty_labels,
         )
     except GpuUnavailableError as err:

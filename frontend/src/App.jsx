@@ -12,6 +12,8 @@ import {
   uploadAsset,
 } from './api/client'
 import SceneViewport from './components/SceneViewport'
+import { useJobPolling } from './hooks/useJobPolling'
+import { getApiErrorMessage, getDatasetStatusLabel, getRenderStatusLabel } from './utils/status'
 
 const defaultConfig = {
   object_transform: {
@@ -219,54 +221,49 @@ export default function App() {
     setActiveTask(`upload-${kind}`)
     try {
       const asset = await uploadAsset(kind, file)
-      if (kind === 'object') {
-        setObjectAsset(asset)
-      } else if (kind === 'environment') {
-        setEnvironmentAsset(asset)
-      } else {
-        setSkyboxAsset(asset)
-        updateSceneConfigLocal((prev) => ({ ...prev, skybox_asset_id: asset.asset_id }))
-      }
+      applyAssetSelection(kind, asset)
       await reloadAssetKind(kind)
     } catch (err) {
-      setError(err.response?.data?.detail || err.message)
+      setError(getApiErrorMessage(err))
     } finally {
       setActiveTask(null)
     }
   }
 
+  function clearAssetSelection(kind) {
+    const clearActions = {
+      object: () => setObjectAsset(null),
+      environment: () => setEnvironmentAsset(null),
+      skybox: () => {
+        setSkyboxAsset(null)
+        updateSceneConfigLocal((prev) => ({ ...prev, skybox_asset_id: null }))
+      },
+    }
+    clearActions[kind]?.()
+  }
+
+  function applyAssetSelection(kind, asset) {
+    const applyActions = {
+      object: () => setObjectAsset(asset),
+      environment: () => setEnvironmentAsset(asset),
+      skybox: () => {
+        setSkyboxAsset(asset)
+        updateSceneConfigLocal((prev) => ({ ...prev, skybox_asset_id: asset.asset_id }))
+      },
+    }
+    applyActions[kind]?.()
+  }
+
   function selectExistingAsset(kind, assetIdRaw) {
     const assetId = Number(assetIdRaw)
     if (!assetId) {
-      if (kind === 'object') {
-        setObjectAsset(null)
-        return
-      }
-      if (kind === 'environment') {
-        setEnvironmentAsset(null)
-        return
-      }
-      if (kind === 'skybox') {
-        setSkyboxAsset(null)
-        updateSceneConfigLocal((prev) => ({ ...prev, skybox_asset_id: null }))
-      }
+      clearAssetSelection(kind)
       return
     }
 
     const selected = assetLibrary[kind].find((item) => item.asset_id === assetId)
     if (!selected) return
-
-    if (kind === 'object') {
-      setObjectAsset(selected)
-      return
-    }
-    if (kind === 'environment') {
-      setEnvironmentAsset(selected)
-      return
-    }
-
-    setSkyboxAsset(selected)
-    updateSceneConfigLocal((prev) => ({ ...prev, skybox_asset_id: selected.asset_id }))
+    applyAssetSelection(kind, selected)
   }
 
   function formatAssetOption(asset) {
@@ -282,40 +279,44 @@ export default function App() {
     })
   }
 
+  async function ensureSceneAndSnapshot() {
+    let targetSceneId = sceneId
+    if (!targetSceneId) {
+      const sceneData = await createScene({
+        object_asset_id: objectAsset.asset_id,
+        environment_asset_id: environmentAsset.asset_id,
+        skybox_asset_id: skyboxAsset?.asset_id ?? null,
+      })
+      targetSceneId = sceneData.scene_id
+      setSceneId(targetSceneId)
+      setRenderJobId(null)
+      setRenderStatus(null)
+    }
+
+    const cameraFromViewport = sceneViewportRef.current?.getCameraTransform?.()
+    const configSnapshot = cameraFromViewport
+      ? { ...sceneConfigRef.current, camera: cameraFromViewport }
+      : sceneConfigRef.current
+
+    sceneConfigRef.current = configSnapshot
+    setSceneConfig(configSnapshot)
+    await updateSceneConfig(targetSceneId, configSnapshot)
+    return { targetSceneId, configSnapshot }
+  }
+
   async function startRender() {
     if (!objectAsset || !environmentAsset) return
     setActiveTask('render')
     setError('')
     setResult(null)
     try {
-      let targetSceneId = sceneId
-      if (!targetSceneId) {
-        const sceneData = await createScene({
-          object_asset_id: objectAsset.asset_id,
-          environment_asset_id: environmentAsset.asset_id,
-          skybox_asset_id: skyboxAsset?.asset_id ?? null,
-        })
-        targetSceneId = sceneData.scene_id
-        setSceneId(targetSceneId)
-        setRenderJobId(null)
-        setRenderStatus(null)
-      }
-
-      const cameraFromViewport = sceneViewportRef.current?.getCameraTransform?.()
-      const configSnapshot = cameraFromViewport
-        ? { ...sceneConfigRef.current, camera: cameraFromViewport }
-        : sceneConfigRef.current
-
-      sceneConfigRef.current = configSnapshot
-      setSceneConfig(configSnapshot)
-
-      await updateSceneConfig(targetSceneId, configSnapshot)
+      const { targetSceneId, configSnapshot } = await ensureSceneAndSnapshot()
       const data = await createRender({ scene_id: targetSceneId, scene_config_snapshot: configSnapshot })
       setRenderJobId(data.render_job_id)
       setRenderStatus(data.status)
     } catch (err) {
       const statusCode = err.response?.status
-      const detail = err.response?.data?.detail || err.message
+      const detail = getApiErrorMessage(err)
       if (statusCode === 503) {
         setError(toRenderErrorMessage('GPU_UNAVAILABLE', detail))
       } else {
@@ -336,25 +337,7 @@ export default function App() {
     setDatasetProgress(0)
     setDatasetResult(null)
     try {
-      let targetSceneId = sceneId
-      if (!targetSceneId) {
-        const sceneData = await createScene({
-          object_asset_id: objectAsset.asset_id,
-          environment_asset_id: environmentAsset.asset_id,
-          skybox_asset_id: skyboxAsset?.asset_id ?? null,
-        })
-        targetSceneId = sceneData.scene_id
-        setSceneId(targetSceneId)
-      }
-
-      const cameraFromViewport = sceneViewportRef.current?.getCameraTransform?.()
-      const configSnapshot = cameraFromViewport
-        ? { ...sceneConfigRef.current, camera: cameraFromViewport }
-        : sceneConfigRef.current
-
-      sceneConfigRef.current = configSnapshot
-      setSceneConfig(configSnapshot)
-      await updateSceneConfig(targetSceneId, configSnapshot)
+      const { targetSceneId, configSnapshot } = await ensureSceneAndSnapshot()
 
       const count = Math.max(2, Math.min(5000, Math.trunc(datasetCount)))
       const width = Math.max(64, Math.min(4096, Math.trunc(datasetWidth)))
@@ -377,72 +360,60 @@ export default function App() {
       setDatasetJobId(data.dataset_job_id)
       setDatasetStatus(data.status)
     } catch (err) {
-      setError(err.response?.data?.detail || err.message)
+      setError(getApiErrorMessage(err))
       setActiveTask(null)
     }
   }
 
-  useEffect(() => {
-    if (!renderJobId) return undefined
+  useJobPolling({
+    jobId: renderJobId,
+    intervalMs: 2000,
+    pollFn: getRenderStatus,
+    onPoll: (statusPayload) => {
+      setRenderStatus(statusPayload.status)
+    },
+    isSuccess: (statusPayload) => statusPayload.status === 'succeeded',
+    isFailure: (statusPayload) => statusPayload.status === 'failed',
+    onSuccess: async (_statusPayload, currentJobId) => {
+      const res = await getRenderResult(currentJobId)
+      setResult(res)
+      setActiveTask(null)
+    },
+    onFailure: (statusPayload) => {
+      setError(toRenderErrorMessage(statusPayload.error_code, statusPayload.error_message))
+      setActiveTask(null)
+    },
+    onError: (err) => {
+      setError(getApiErrorMessage(err))
+      setActiveTask(null)
+    },
+  })
 
-    const timer = setInterval(async () => {
-      try {
-        const statusPayload = await getRenderStatus(renderJobId)
-        setRenderStatus(statusPayload.status)
-
-        if (statusPayload.status === 'succeeded') {
-          const res = await getRenderResult(renderJobId)
-          setResult(res)
-          setActiveTask(null)
-          clearInterval(timer)
-        }
-
-        if (statusPayload.status === 'failed') {
-          setError(toRenderErrorMessage(statusPayload.error_code, statusPayload.error_message))
-          setActiveTask(null)
-          clearInterval(timer)
-        }
-      } catch (err) {
-        setError(err.response?.data?.detail || err.message)
-        setActiveTask(null)
-        clearInterval(timer)
-      }
-    }, 2000)
-
-    return () => clearInterval(timer)
-  }, [renderJobId])
-
-  useEffect(() => {
-    if (!datasetJobId) return undefined
-
-    const timer = setInterval(async () => {
-      try {
-        const statusPayload = await getYoloDatasetStatus(datasetJobId)
-        setDatasetStatus(statusPayload.status)
-        setDatasetProgress(statusPayload.progress ?? 0)
-
-        if (statusPayload.status === 'succeeded') {
-          const res = await getYoloDatasetResult(datasetJobId)
-          setDatasetResult(res)
-          setDatasetProgress(100)
-          setActiveTask(null)
-          clearInterval(timer)
-        }
-
-        if (statusPayload.status === 'failed') {
-          setError(statusPayload.error_message || 'Ошибка генерации датасета')
-          setActiveTask(null)
-          clearInterval(timer)
-        }
-      } catch (err) {
-        setError(err.response?.data?.detail || err.message)
-        setActiveTask(null)
-        clearInterval(timer)
-      }
-    }, 2000)
-
-    return () => clearInterval(timer)
-  }, [datasetJobId])
+  useJobPolling({
+    jobId: datasetJobId,
+    intervalMs: 2000,
+    pollFn: getYoloDatasetStatus,
+    onPoll: (statusPayload) => {
+      setDatasetStatus(statusPayload.status)
+      setDatasetProgress(statusPayload.progress ?? 0)
+    },
+    isSuccess: (statusPayload) => statusPayload.status === 'succeeded',
+    isFailure: (statusPayload) => statusPayload.status === 'failed',
+    onSuccess: async (_statusPayload, currentJobId) => {
+      const res = await getYoloDatasetResult(currentJobId)
+      setDatasetResult(res)
+      setDatasetProgress(100)
+      setActiveTask(null)
+    },
+    onFailure: (statusPayload) => {
+      setError(statusPayload.error_message || 'Ошибка генерации датасета')
+      setActiveTask(null)
+    },
+    onError: (err) => {
+      setError(getApiErrorMessage(err))
+      setActiveTask(null)
+    },
+  })
 
   useEffect(() => {
     const sidebarNode = sidebarRef.current
@@ -465,28 +436,16 @@ export default function App() {
 
   useEffect(() => {
     reloadAssetLibrary().catch((err) => {
-      setError(err.response?.data?.detail || err.message)
+      setError(getApiErrorMessage(err))
     })
   }, [])
 
   const statusLabel = useMemo(() => {
-    if (!renderStatus) return 'Ожидание'
-
-    if (renderStatus === 'queued') return 'В очереди'
-    if (renderStatus === 'running') return 'Выполняется'
-    if (renderStatus === 'succeeded') return 'Готово'
-    if (renderStatus === 'failed') return 'Ошибка'
-
-    return renderStatus
+    return getRenderStatusLabel(renderStatus)
   }, [renderStatus])
 
   const datasetStatusLabel = useMemo(() => {
-    if (!datasetStatus) return 'Ожидание'
-    if (datasetStatus === 'queued') return 'В очереди'
-    if (datasetStatus === 'running') return 'Генерация'
-    if (datasetStatus === 'succeeded') return 'Готово'
-    if (datasetStatus === 'failed') return 'Ошибка'
-    return datasetStatus
+    return getDatasetStatusLabel(datasetStatus)
   }, [datasetStatus])
 
   const datasetResolutionLabel = `${datasetWidth}x${datasetHeight}`

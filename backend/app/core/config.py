@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     render_max_bounces: int
     celery_worker_concurrency: int
     dataset_render_parallelism: int
+    llm_enhance_parallelism: int = 4
 
 
 @lru_cache
