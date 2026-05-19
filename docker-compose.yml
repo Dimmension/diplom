@@ -103,7 +103,7 @@ services:
       - minio
 
   worker2:
-    image: diplom_new-worker
+    image: renderforge-worker
     container_name: render_worker2
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY?CELERY_WORKER_CONCURRENCY_REQUIRED}
     environment:

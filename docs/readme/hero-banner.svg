@@ -1,0 +1,24 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0A1F44"/>
+      <stop offset="1" stop-color="#123D7A"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <circle cx="1110" cy="110" r="170" fill="#3AB0FF" fill-opacity="0.22"/>
+  <circle cx="180" cy="560" r="210" fill="#5EE6A8" fill-opacity="0.12"/>
+
+  <text x="120" y="280" fill="#F4FAFF" font-family="'Segoe UI', Arial, sans-serif" font-size="86" font-weight="800">
+    RenderForge
+  </text>
+  <text x="120" y="350" fill="#CFE6FF" font-family="'Segoe UI', Arial, sans-serif" font-size="34" font-weight="500">
+    3D renders, YOLO datasets, and image enhancement
+  </text>
+
+  <rect x="120" y="400" width="430" height="62" rx="14" fill="#1C66D6"/>
+  <text x="335" y="440" text-anchor="middle" fill="#F4FAFF" font-family="'Segoe UI', Arial, sans-serif" font-size="27" font-weight="700">
+    FastAPI • React • BlenderProc
+  </text>
+</svg>

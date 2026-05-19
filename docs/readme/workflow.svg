@@ -1,0 +1,40 @@
+<svg width="1280" height="500" viewBox="0 0 1280 500" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1280" height="500" rx="24" fill="#0F172A"/>
+  <text x="70" y="78" fill="#ECF6FF" font-family="'Segoe UI', Arial, sans-serif" font-size="40" font-weight="800">Поток работы</text>
+
+  <g>
+    <rect x="70" y="140" width="210" height="250" rx="18" fill="#1E293B" stroke="#425B84"/>
+    <text x="95" y="192" fill="#D9E8FF" font-family="'Segoe UI', Arial, sans-serif" font-size="24" font-weight="700">1. Upload</text>
+    <text x="95" y="230" fill="#BFD0E8" font-family="'Segoe UI', Arial, sans-serif" font-size="20">Object / Env / Skybox</text>
+  </g>
+
+  <g>
+    <rect x="320" y="140" width="210" height="250" rx="18" fill="#1E293B" stroke="#425B84"/>
+    <text x="345" y="192" fill="#D9E8FF" font-family="'Segoe UI', Arial, sans-serif" font-size="24" font-weight="700">2. Scene</text>
+    <text x="345" y="230" fill="#BFD0E8" font-family="'Segoe UI', Arial, sans-serif" font-size="20">Transform + camera</text>
+  </g>
+
+  <g>
+    <rect x="570" y="140" width="210" height="250" rx="18" fill="#1E293B" stroke="#425B84"/>
+    <text x="595" y="192" fill="#D9E8FF" font-family="'Segoe UI', Arial, sans-serif" font-size="24" font-weight="700">3. Render</text>
+    <text x="595" y="230" fill="#BFD0E8" font-family="'Segoe UI', Arial, sans-serif" font-size="20">PNG + Mask + BBox</text>
+  </g>
+
+  <g>
+    <rect x="820" y="140" width="210" height="250" rx="18" fill="#1E293B" stroke="#425B84"/>
+    <text x="845" y="192" fill="#D9E8FF" font-family="'Segoe UI', Arial, sans-serif" font-size="24" font-weight="700">4. Dataset</text>
+    <text x="845" y="230" fill="#BFD0E8" font-family="'Segoe UI', Arial, sans-serif" font-size="20">YOLO ZIP</text>
+  </g>
+
+  <g>
+    <rect x="1070" y="140" width="140" height="250" rx="18" fill="#0F766E" stroke="#4BD8CB"/>
+    <text x="1092" y="192" fill="#D7FFF9" font-family="'Segoe UI', Arial, sans-serif" font-size="24" font-weight="700">5.</text>
+    <text x="1092" y="230" fill="#D7FFF9" font-family="'Segoe UI', Arial, sans-serif" font-size="24" font-weight="700">LLM</text>
+    <text x="1092" y="265" fill="#B6F5EC" font-family="'Segoe UI', Arial, sans-serif" font-size="20">Enhance</text>
+  </g>
+
+  <path d="M280 265H320" stroke="#6F8FC2" stroke-width="4"/>
+  <path d="M530 265H570" stroke="#6F8FC2" stroke-width="4"/>
+  <path d="M780 265H820" stroke="#6F8FC2" stroke-width="4"/>
+  <path d="M1030 265H1070" stroke="#6F8FC2" stroke-width="4"/>
+</svg>

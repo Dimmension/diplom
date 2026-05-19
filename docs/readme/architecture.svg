@@ -1,0 +1,55 @@
+<svg width="1280" height="760" viewBox="0 0 1280 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F4F8FF"/>
+      <stop offset="1" stop-color="#ECFFF8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="760" fill="url(#bg)"/>
+  <text x="70" y="76" fill="#15223A" font-family="'Segoe UI', Arial, sans-serif" font-size="44" font-weight="800">Архитектура системы</text>
+
+  <rect x="70" y="130" width="250" height="120" rx="16" fill="#1F6FEB"/>
+  <text x="95" y="182" fill="#F5FAFF" font-family="'Segoe UI', Arial, sans-serif" font-size="28" font-weight="700">Frontend</text>
+  <text x="95" y="216" fill="#DCEBFF" font-family="'Segoe UI', Arial, sans-serif" font-size="22">React + Vite</text>
+
+  <rect x="410" y="110" width="340" height="160" rx="18" fill="#12355B"/>
+  <text x="438" y="173" fill="#EBF5FF" font-family="'Segoe UI', Arial, sans-serif" font-size="30" font-weight="700">API сервис</text>
+  <text x="438" y="206" fill="#C8DEF3" font-family="'Segoe UI', Arial, sans-serif" font-size="22">FastAPI /assets /scenes /renders</text>
+  <text x="438" y="236" fill="#C8DEF3" font-family="'Segoe UI', Arial, sans-serif" font-size="22">/datasets/yolo /llm</text>
+
+  <rect x="850" y="130" width="340" height="120" rx="16" fill="#2C3E50"/>
+  <text x="878" y="182" fill="#F0F6FA" font-family="'Segoe UI', Arial, sans-serif" font-size="28" font-weight="700">PostgreSQL</text>
+  <text x="878" y="216" fill="#D2E1EB" font-family="'Segoe UI', Arial, sans-serif" font-size="22">Метаданные и статусы задач</text>
+
+  <rect x="410" y="320" width="340" height="120" rx="16" fill="#B96528"/>
+  <text x="440" y="370" fill="#FFF6EE" font-family="'Segoe UI', Arial, sans-serif" font-size="28" font-weight="700">Redis + Celery</text>
+  <text x="440" y="404" fill="#FFE4CF" font-family="'Segoe UI', Arial, sans-serif" font-size="22">Очередь и фоновые пайплайны</text>
+
+  <rect x="850" y="320" width="340" height="120" rx="16" fill="#2E8B57"/>
+  <text x="878" y="370" fill="#F4FFF8" font-family="'Segoe UI', Arial, sans-serif" font-size="28" font-weight="700">MinIO / S3</text>
+  <text x="878" y="404" fill="#D5F6E3" font-family="'Segoe UI', Arial, sans-serif" font-size="22">GLB, PNG, ZIP, preview</text>
+
+  <rect x="410" y="500" width="340" height="170" rx="16" fill="#6C3FC5"/>
+  <text x="438" y="554" fill="#F8F1FF" font-family="'Segoe UI', Arial, sans-serif" font-size="28" font-weight="700">GPU Worker</text>
+  <text x="438" y="590" fill="#E6D9FF" font-family="'Segoe UI', Arial, sans-serif" font-size="22">BlenderProc Render</text>
+  <text x="438" y="620" fill="#E6D9FF" font-family="'Segoe UI', Arial, sans-serif" font-size="22">YOLO generation</text>
+
+  <rect x="850" y="500" width="340" height="170" rx="16" fill="#0F766E"/>
+  <text x="878" y="554" fill="#EFFFFB" font-family="'Segoe UI', Arial, sans-serif" font-size="28" font-weight="700">LLM Enhance</text>
+  <text x="878" y="590" fill="#CFF8EF" font-family="'Segoe UI', Arial, sans-serif" font-size="22">LangGraph orchestration</text>
+  <text x="878" y="620" fill="#CFF8EF" font-family="'Segoe UI', Arial, sans-serif" font-size="22">gpt-5.4 + gpt-image-1.5</text>
+
+  <path d="M320 190H410" stroke="#3D5A80" stroke-width="4"/>
+  <path d="M750 190H850" stroke="#3D5A80" stroke-width="4"/>
+  <path d="M580 270V320" stroke="#3D5A80" stroke-width="4"/>
+  <path d="M750 380H850" stroke="#3D5A80" stroke-width="4"/>
+  <path d="M580 440V500" stroke="#3D5A80" stroke-width="4"/>
+  <path d="M1020 440V500" stroke="#3D5A80" stroke-width="4"/>
+
+  <text x="330" y="176" fill="#2B3D56" font-family="'Segoe UI', Arial, sans-serif" font-size="18">HTTP</text>
+  <text x="762" y="176" fill="#2B3D56" font-family="'Segoe UI', Arial, sans-serif" font-size="18">SQLAlchemy</text>
+  <text x="598" y="305" fill="#2B3D56" font-family="'Segoe UI', Arial, sans-serif" font-size="18">Queue</text>
+  <text x="764" y="366" fill="#2B3D56" font-family="'Segoe UI', Arial, sans-serif" font-size="18">Artifacts</text>
+  <text x="598" y="488" fill="#2B3D56" font-family="'Segoe UI', Arial, sans-serif" font-size="18">Render jobs</text>
+  <text x="1034" y="488" fill="#2B3D56" font-family="'Segoe UI', Arial, sans-serif" font-size="18">Enhance jobs</text>
+</svg>
